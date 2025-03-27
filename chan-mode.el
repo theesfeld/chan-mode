@@ -76,17 +76,28 @@
      chan-image-base-url board "/" (number-to-string tim) ext)))
 
 (defun chan--fetch-image (url &optional full-size)
-  "Fetch image from URL; FULL-SIZE nil for thumbnail, t for full size."
-  (when url ; Guard against nil URL
+  "Fetch image from URL with timeout; FULL-SIZE nil for thumbnail, t for full size."
+  (when url
     (chan--rate-limit-wait)
-    (with-temp-buffer
-      (url-insert-file-contents url)
-      (create-image (buffer-string)
-                    nil t
-                    :max-width
-                    (if full-size
-                        nil
-                      200)))))
+    (let ((buffer (get-buffer-create "*chan-image-fetch*")))
+      (with-current-buffer buffer
+        (erase-buffer)
+        (condition-case err
+            (progn
+              (url-retrieve-synchronously url t t 5) ; 5-second timeout
+              (goto-char (point-min))
+              (when
+                  (re-search-forward "\r?\n\r?\n" nil t) ; Skip headers
+                (create-image (buffer-substring-no-properties
+                               (point) (point-max))
+                              nil t
+                              :max-width
+                              (if full-size
+                                  nil
+                                200))))
+          (error
+           (message "Failed to fetch image %s: %s" url err) nil))
+        (kill-buffer buffer)))))
 
 ;;; Catalog View
 (defvar chan-catalog-mode-map
