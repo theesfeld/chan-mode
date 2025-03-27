@@ -50,22 +50,20 @@
 (defun chan--fetch-json (url)
   "Fetch and parse JSON from URL, ensuring all arrays are converted to lists."
   (chan--rate-limit-wait)
-  (Focus
-   on
-   ensuring
-   nested
-   arrays
-   are
-   lists:with-temp-buffer
-   (url-insert-file-contents url)
-   (let ((json-object-type 'alist) ; Objects as association lists
-         (json-array-type 'list) ; Arrays as lists
-         (json-key-type 'symbol)) ; Keys as symbols
-     (let ((data (json-parse-buffer)))
-       ;; If top-level data is a vector, convert it to a list
-       (if (vectorp data)
-           (append data nil)
-         data)))))
+  (with-temp-buffer
+    (condition-case err
+        (progn
+          (url-insert-file-contents url)
+          (let
+              ((json-object-type 'alist) ; Objects as association lists
+               (json-array-type 'list) ; Arrays as lists
+               (json-key-type 'symbol)) ; Keys as symbols
+            (let ((data (json-parse-buffer)))
+              ;; If top-level data is a vector, convert it to a list
+              (if (vectorp data)
+                  (append data nil)
+                data))))
+      (error (message "Error fetching JSON: %s" err) nil))))
 
 (defun chan--get-boards ()
   "Fetch list of boards, caching result."
@@ -95,10 +93,10 @@
 ;;; Catalog View
 (defvar chan-catalog-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") 'chan-catalog-open-thread)
-    (define-key map (kbd "b") 'chan-catalog)
+    (define-key map (kbd "RET") #'chan-catalog-open-thread)
+    (define-key map (kbd "b") #'chan-catalog)
     map)
-  "Keymap for chan-catalog-mode.")
+  "Keymap for `chan-catalog-mode'.")
 
 (defun chan-catalog (board)
   "Display catalog for BOARD."
@@ -127,34 +125,35 @@
             (error "Failed to fetch catalog data for /%s/" board)
           (dolist (page catalog)
             (let ((threads (alist-get 'threads page)))
-              (if (not (listp threads))
-                  (error
-                   "Invalid threads data for /%s/: expected list, got %S"
-                   board
-                   threads)
-                (dolist (thread threads)
-                  (let* ((no (alist-get 'no thread))
-                         (sub
-                          (or (alist-get 'sub thread) "No Subject"))
-                         (replies (alist-get 'replies thread))
-                         (tim (alist-get 'tim thread))
-                         (ext (alist-get 'ext thread))
-                         (image
-                          (when (and tim ext)
-                            (chan--fetch-image
-                             (chan--image-url board tim ext)))))
-                    (insert
-                     (propertize (format "[%d] %s (%d replies)\n"
-                                         no sub replies)
-                                 'thread-id
-                                 no
-                                 'face
-                                 'link
-                                 'keymap
-                                 chan-catalog-mode-map))
-                    (when image
-                      (insert-image image))
-                    (insert "\n\n")))))))
+              (unless (listp threads)
+                (error
+                 "Invalid threads data for /%s/: expected list, got %S"
+                 board
+                 threads))
+              (dolist (thread threads)
+                (let* ((no (alist-get 'no thread))
+                       (sub (or (alist-get 'sub thread) "No Subject"))
+                       (replies (alist-get 'replies thread))
+                       (tim (alist-get 'tim thread))
+                       (ext (alist-get 'ext thread))
+                       (image
+                        (when (and tim ext)
+                          (chan--fetch-image
+                           (chan--image-url board tim ext)))))
+                  (insert
+                   (propertize (format "[%d] %s (%d replies)\n"
+                                       no
+                                       sub
+                                       replies)
+                               'thread-id
+                               no
+                               'face
+                               'link
+                               'keymap
+                               chan-catalog-mode-map))
+                  (when image
+                    (insert-image image))
+                  (insert "\n\n"))))))
         (goto-char (point-min)))
       (switch-to-buffer buffer))))
 
@@ -215,7 +214,10 @@
              (propertize (format "Post #%d\n" no) 'face 'italic))
             (if (fboundp 'libxml-parse-html-region)
                 (shr-insert-document
-                 (libxml-parse-html-region (point) (point) com))
+                 (with-temp-buffer
+                   (insert com)
+                   (libxml-parse-html-region
+                    (point-min) (point-max))))
               (insert com))
             (insert "\n")
             (when thumbnail
@@ -233,13 +235,13 @@
 
 (defvar chan-thread-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "n") 'chan-thread-next)
-    (define-key map (kbd "p") 'chan-thread-prev)
-    (define-key map (kbd "q") 'kill-this-buffer)
-    (define-key map (kbd "e") 'chan-thread-toggle-image-size)
-    (define-key map (kbd "i") 'chan-thread-image-view)
+    (define-key map (kbd "n") #'chan-thread-next)
+    (define-key map (kbd "p") #'chan-thread-prev)
+    (define-key map (kbd "q") #'kill-this-buffer)
+    (define-key map (kbd "e") #'chan-thread-toggle-image-size)
+    (define-key map (kbd "i") #'chan-thread-image-view)
     map)
-  "Keymap for chan-thread-mode.")
+  "Keymap for `chan-thread-mode'.")
 
 (define-derived-mode
  chan-thread-mode
@@ -264,30 +266,29 @@
   "Toggle image under point between thumbnail and full size."
   (interactive)
   (let ((pos (point)))
-    (cl-dolist
-     (img-data chan--thread-images)
-     (when (and (>= pos (car img-data))
-                (< pos
-                   (+ (car img-data)
-                      (length (cdr (car (cdr img-data)))))))
-       (let* ((thumbnail (car (cdr img-data)))
-              (full-size-fn (cdr (cdr img-data)))
-              (current-image
-               (get-text-property (car img-data) 'display))
-              (full-size (funcall full-size-fn)))
-         (save-excursion
-           (goto-char (car img-data))
-           (let ((inhibit-read-only t))
-             (delete-char 1)
-             (insert-image
-              (if (eq current-image thumbnail)
-                  full-size
-                thumbnail))))
-         (message "Image %s"
-                  (if (eq current-image thumbnail)
-                      "expanded"
-                    "shrunk"))
-         (cl-return))))))
+    (dolist (img-data chan--thread-images)
+      (when (and (>= pos (car img-data))
+                 (< pos
+                    (+ (car img-data)
+                       (length (cdr (car (cdr img-data)))))))
+        (let* ((thumbnail (car (cdr img-data)))
+               (full-size-fn (cdr (cdr img-data)))
+               (current-image
+                (get-text-property (car img-data) 'display))
+               (full-size (funcall full-size-fn)))
+          (save-excursion
+            (goto-char (car img-data))
+            (let ((inhibit-read-only t))
+              (delete-char 1)
+              (insert-image
+               (if (eq current-image thumbnail)
+                   full-size
+                 thumbnail))))
+          (message "Image %s"
+                   (if (eq current-image thumbnail)
+                       "expanded"
+                     "shrunk"))
+          (cl-return))))))
 
 ;;; Image View Mode
 (defvar-local chan--image-view-index 0
@@ -328,11 +329,11 @@
 
 (defvar chan-image-view-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "<right>") 'chan-image-view-next)
-    (define-key map (kbd "<left>") 'chan-image-view-prev)
-    (define-key map (kbd "q") 'kill-this-buffer)
+    (define-key map (kbd "<right>") #'chan-image-view-next)
+    (define-key map (kbd "<left>") #'chan-image-view-prev)
+    (define-key map (kbd "q") #'kill-this-buffer)
     map)
-  "Keymap for chan-image-view-mode.")
+  "Keymap for `chan-image-view-mode'.")
 
 (define-derived-mode
  chan-image-view-mode
