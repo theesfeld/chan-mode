@@ -44,8 +44,8 @@
   "Ensure at least 1 second between API requests."
   (let ((elapsed (- (float-time) chan--last-request-time)))
     (when (< elapsed 1.0)
-      (sleep-for (- 1.0 elapsed))))
-  (setq chan--last-request-time (float-time)))
+      (sleep-for (- 1.0 elapsed)))
+    (setq chan--last-request-time (float-time))))
 
 (defun chan--fetch-json (url)
   "Fetch and parse JSON from URL."
@@ -67,7 +67,7 @@
             (alist-get
              'boards
              (chan--fetch-json
-              (concat chan-base-url "boards.json")))))
+              (concat chan-base-url "boards.json"))))))
 
 (defun chan--image-url (board tim ext)
   "Construct image URL from BOARD, TIM, and EXT."
@@ -144,8 +144,8 @@
                   (when image
                     (insert-image image))
                   (insert "\n\n"))))))
-        (goto-char (point-min)))
-      (switch-to-buffer buffer))))
+        (goto-char (point-min))))
+    (switch-to-buffer buffer)))
 
 (define-derived-mode
  chan-catalog-mode
