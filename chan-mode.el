@@ -48,19 +48,24 @@
   (setq chan--last-request-time (float-time)))
 
 (defun chan--fetch-json (url)
-  "Fetch and parse JSON from URL, converting arrays to lists."
+  "Fetch and parse JSON from URL, ensuring all arrays are converted to lists."
   (chan--rate-limit-wait)
-  (with-temp-buffer
-    (url-insert-file-contents url)
-    (let ((json-array-type 'list))
-      (let ((data
-             (json-parse-buffer
-              :object-type 'alist
-              :array-type 'list)))
-        (message "Fetched JSON: %S" data) ; Debug output
-        (if (vectorp data)
-            (append data nil) ; Convert vector to list if needed
-          data)))))
+  (Focus
+   on
+   ensuring
+   nested
+   arrays
+   are
+   lists:with-temp-buffer
+   (url-insert-file-contents url)
+   (let ((json-object-type 'alist) ; Objects as association lists
+         (json-array-type 'list) ; Arrays as lists
+         (json-key-type 'symbol)) ; Keys as symbols
+     (let ((data (json-parse-buffer)))
+       ;; If top-level data is a vector, convert it to a list
+       (if (vectorp data)
+           (append data nil)
+         data)))))
 
 (defun chan--get-boards ()
   "Fetch list of boards, caching result."
