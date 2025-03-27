@@ -48,21 +48,16 @@
   (setq chan--last-request-time (float-time)))
 
 (defun chan--fetch-json (url)
-  "Fetch and parse JSON from URL, ensuring all arrays are converted to lists."
+  "Fetch and parse JSON from URL."
   (chan--rate-limit-wait)
   (with-temp-buffer
     (condition-case err
         (progn
           (url-insert-file-contents url)
-          (let
-              ((json-object-type 'alist) ; Objects as association lists
-               (json-array-type 'list) ; Arrays as lists
-               (json-key-type 'symbol)) ; Keys as symbols
-            (let ((data (json-parse-buffer)))
-              ;; If top-level data is a vector, convert it to a list
-              (if (vectorp data)
-                  (append data nil)
-                data))))
+          (let ((json-object-type 'alist)
+                (json-array-type 'list)
+                (json-key-type 'symbol))
+            (json-read)))
       (error (message "Error fetching JSON: %s" err) nil))))
 
 (defun chan--get-boards ()
@@ -72,7 +67,7 @@
             (alist-get
              'boards
              (chan--fetch-json
-              (concat chan-base-url "boards.json"))))))
+              (concat chan-base-url "boards.json")))))
 
 (defun chan--image-url (board tim ext)
   "Construct image URL from BOARD, TIM, and EXT."
@@ -125,11 +120,6 @@
             (error "Failed to fetch catalog data for /%s/" board)
           (dolist (page catalog)
             (let ((threads (alist-get 'threads page)))
-              (unless (listp threads)
-                (error
-                 "Invalid threads data for /%s/: expected list, got %S"
-                 board
-                 threads))
               (dolist (thread threads)
                 (let* ((no (alist-get 'no thread))
                        (sub (or (alist-get 'sub thread) "No Subject"))
