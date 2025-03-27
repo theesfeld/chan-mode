@@ -48,12 +48,16 @@
   (setq chan--last-request-time (float-time)))
 
 (defun chan--fetch-json (url)
-  "Fetch and parse JSON from URL, ensuring arrays are lists."
+  "Fetch and parse JSON from URL, converting arrays to lists."
   (chan--rate-limit-wait)
   (with-temp-buffer
     (url-insert-file-contents url)
-    (let ((json-array-type 'list))  ; Force JSON arrays to Lisp lists
-      (json-parse-buffer :object-type 'alist :array-type 'list))))
+    (let ((json-array-type 'list))
+      (let ((data (json-parse-buffer :object-type 'alist :array-type 'list)))
+        (message "Fetched JSON: %S" data)  ; Debug output
+        (if (vectorp data)
+            (append data nil)  ; Convert vector to list if needed
+          data)))))
 
 (defun chan--get-boards ()
   "Fetch list of boards, caching result."
@@ -98,7 +102,7 @@
         (erase-buffer)
         (chan-catalog-mode)
         (insert (propertize (format "Catalog for /%s/\n\n" board) 'face 'bold))
-        (if (not catalog)
+        (if (null catalog)
             (error "Failed to fetch catalog data for /%s/" board)
           (dolist (page catalog)
             (let ((threads (alist-get 'threads page)))
@@ -155,7 +159,7 @@
                  (thumbnail (when image-url (chan--fetch-image image-url))))
             (insert (propertize (format "Post #%d\n" no) 'face 'italic))
             (if (fboundp 'libxml-parse-html-region)
-                (shr-insert-document (libxml-parse-html-region (point) (point) (insert com)))
+                (shr-insert-document (libxml-parse-html-region (point) (point) com))
               (insert com))
             (insert "\n")
             (when thumbnail
