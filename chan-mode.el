@@ -52,7 +52,7 @@
   (chan--rate-limit-wait)
   (with-temp-buffer
     (url-insert-file-contents url)
-    (json-parse-buffer :object-type 'alist)))
+    (json-parse-buffer :object-type 'alist :array-type 'list)))
 
 (defun chan--get-boards ()
   "Fetch list of boards, caching result."
@@ -110,31 +110,39 @@
          (propertize (format "Catalog for /%s/\n\n" board)
                      'face
                      'bold))
+        (unless (listp catalog)
+          (error
+           "Invalid catalog data: expected a list, got %S" catalog))
         (dolist (page catalog)
-          (dolist (thread (alist-get 'threads page))
-            (let* ((no (alist-get 'no thread))
-                   (sub (or (alist-get 'sub thread) "No Subject"))
-                   (replies (alist-get 'replies thread))
-                   (tim (alist-get 'tim thread))
-                   (ext (alist-get 'ext thread))
-                   (image
-                    (when (and tim ext)
-                      (chan--fetch-image
-                       (chan--image-url board tim ext)))))
-              (insert
-               (propertize (format "[%d] %s (%d replies)\n"
-                                   no
-                                   sub
-                                   replies)
-                           'thread-id
-                           no
-                           'face
-                           'link
-                           'keymap
-                           chan-catalog-mode-map))
-              (when image
-                (insert-image image))
-              (insert "\n\n")))))
+          (let ((threads (alist-get 'threads page)))
+            (unless (listp threads)
+              (error
+               "Invalid threads data: expected a list, got %S"
+               threads))
+            (dolist (thread threads)
+              (let* ((no (alist-get 'no thread))
+                     (sub (or (alist-get 'sub thread) "No Subject"))
+                     (replies (alist-get 'replies thread))
+                     (tim (alist-get 'tim thread))
+                     (ext (alist-get 'ext thread))
+                     (image
+                      (when (and tim ext)
+                        (chan--fetch-image
+                         (chan--image-url board tim ext)))))
+                (insert
+                 (propertize (format "[%d] %s (%d replies)\n"
+                                     no
+                                     sub
+                                     replies)
+                             'thread-id
+                             no
+                             'face
+                             'link
+                             'keymap
+                             chan-catalog-mode-map))
+                (when image
+                  (insert-image image))
+                (insert "\n\n"))))))
       (goto-char (point-min)))
     (switch-to-buffer buffer)))
 
@@ -197,7 +205,7 @@
                 (shr-insert-document
                  (libxml-parse-html-region
                   (point) (point) (insert com)))
-              (insert com)) ;; Fallback to plain text
+              (insert com))
             (insert "\n")
             (when thumbnail
               (let ((pos (point)))
@@ -259,7 +267,7 @@
          (save-excursion
            (goto-char (car img-data))
            (let ((inhibit-read-only t))
-             (delete-char 1) ;; Remove old image
+             (delete-char 1)
              (insert-image
               (if (eq current-image thumbnail)
                   full-size
