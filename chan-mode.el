@@ -1,15 +1,15 @@
 ;;; chan-mode.el --- Read 4chan boards as feeds in Emacs -*- lexical-binding: t -*-
 
 ;; Author: Blackdream <grim@samhain.su>
-;; Version: 1.1
+;; Version: 1.2
 ;; Package-Requires: ((emacs "30.1") (cl-lib "0.5"))
 ;; Keywords: comm, multimedia
 ;; URL: https://github.com/theesfeld/chan-mode
 
 ;;; Commentary:
 ;; This package provides a read-only interface to 4chan boards using the 4chan API.
-;; Features: catalog view with board switching, thread view with navigation and
-;; expandable images, and an image-only view mode. No external dependencies; pure Emacs.
+;; Features: catalog view with OP images only, thread view with async image loading,
+;; navigation, expandable images, and an image-only view mode. No external dependencies.
 
 ;;; Code:
 
@@ -38,6 +38,10 @@
   "Timestamp of last API request to enforce rate limiting.")
 (defvar chan--current-board nil
   "Current board being viewed.")
+(defvar chan--image-queue nil
+  "Queue of (buffer . (pos . url)) for async image fetches.")
+(defvar chan--image-timer nil
+  "Timer for processing image queue.")
 
 ;;; Utility Functions
 (defun chan--rate-limit-wait ()
@@ -48,7 +52,7 @@
     (setq chan--last-request-time (float-time))))
 
 (defun chan--fetch-json (url)
-  "Fetch and parse JSON from URL."
+  "Fetch and parse JSON from URL synchronously."
   (chan--rate-limit-wait)
   (with-temp-buffer
     (condition-case err
@@ -71,12 +75,12 @@
 
 (defun chan--image-url (board tim ext)
   "Construct image URL from BOARD, TIM, and EXT."
-  (when (and tim ext) ; Ensure both are non-nil
+  (when (and tim ext)
     (concat
      chan-image-base-url board "/" (number-to-string tim) ext)))
 
-(defun chan--fetch-image (url &optional full-size)
-  "Fetch image from URL with timeout; FULL-SIZE nil for thumbnail, t for full size."
+(defun chan--fetch-image-sync (url &optional full-size)
+  "Fetch image from URL synchronously with timeout."
   (when url
     (chan--rate-limit-wait)
     (let ((buffer (get-buffer-create "*chan-image-fetch*")))
@@ -86,8 +90,7 @@
             (progn
               (url-retrieve-synchronously url t t 5) ; 5-second timeout
               (goto-char (point-min))
-              (when
-                  (re-search-forward "\r?\n\r?\n" nil t) ; Skip headers
+              (when (re-search-forward "\r?\n\r?\n" nil t)
                 (create-image (buffer-substring-no-properties
                                (point) (point-max))
                               nil t
@@ -99,6 +102,38 @@
            (message "Failed to fetch image %s: %s" url err) nil))
         (kill-buffer buffer)))))
 
+(defun chan--process-image-queue ()
+  "Process one image from the queue asynchronously."
+  (when chan--image-queue
+    (let* ((task (pop chan--image-queue))
+           (buffer (car task))
+           (pos (car (cdr task)))
+           (url (cdr (cdr task))))
+      (chan--rate-limit-wait)
+      (url-retrieve
+       url
+       (lambda (status &rest args)
+         (when (and (not status) (buffer-live-p buffer))
+           (with-current-buffer buffer
+             (goto-char (point-min))
+             (when (re-search-forward "\r?\n\r?\n" nil t)
+               (let ((inhibit-read-only t)
+                     (image
+                      (create-image (buffer-substring-no-properties
+                                     (point) (point-max))
+                                    nil t
+                                    :max-width 200)))
+                 (save-excursion
+                   (goto-char pos)
+                   (delete-char 1)
+                   (insert-image image))))))
+         (kill-buffer))
+       nil t t))
+    (if chan--image-queue
+        (setq chan--image-timer
+              (run-at-time 1 nil #'chan--process-image-queue))
+      (setq chan--image-timer nil))))
+
 ;;; Catalog View
 (defvar chan-catalog-mode-map
   (let ((map (make-sparse-keymap)))
@@ -108,7 +143,7 @@
   "Keymap for `chan-catalog-mode'.")
 
 (defun chan-catalog (board)
-  "Display catalog for BOARD."
+  "Display catalog for BOARD with OP images only."
   (interactive (list
                 (completing-read
                  "Board: "
@@ -142,7 +177,7 @@
                        (ext (alist-get 'ext thread))
                        (image
                         (when (and tim ext)
-                          (chan--fetch-image
+                          (chan--fetch-image-sync
                            (chan--image-url board tim ext)))))
                   (insert
                    (propertize (format "[%d] %s (%d replies)\n"
@@ -179,10 +214,10 @@
 
 ;;; Thread View
 (defvar-local chan--thread-images nil
-  "Alist of (position . (thumbnail . full-size)) for images in thread.")
+  "Alist of (position . (thumbnail . full-size-fn)) for images in thread.")
 
 (defun chan-thread (board thread-id)
-  "Display THREAD-ID from BOARD."
+  "Display THREAD-ID from BOARD with async image loading."
   (let ((thread
          (chan--fetch-json
           (concat
@@ -210,10 +245,7 @@
                  (ext (alist-get 'ext post))
                  (image-url
                   (when (and tim ext)
-                    (chan--image-url board tim ext)))
-                 (thumbnail
-                  (when image-url
-                    (chan--fetch-image image-url))))
+                    (chan--image-url board tim ext))))
             (insert
              (propertize (format "Post #%d\n" no) 'face 'italic))
             (if (fboundp 'libxml-parse-html-region)
@@ -224,17 +256,23 @@
                     (point-min) (point-max))))
               (insert com))
             (insert "\n")
-            (when thumbnail
+            (when image-url
               (let ((pos (point)))
-                (insert-image thumbnail)
+                (insert "□") ; Placeholder
                 (push (cons
                        pos
                        (cons
-                        thumbnail
-                        (lambda () (chan--fetch-image image-url t))))
-                      chan--thread-images)))
+                        nil
+                        (lambda ()
+                          (chan--fetch-image-sync image-url t))))
+                      chan--thread-images)
+                (push (cons (current-buffer) (cons pos image-url))
+                      chan--image-queue)))
             (insert "\n\n"))))
-      (goto-char (point-min)))
+      (goto-char (point-min))
+      (unless chan--image-timer
+        (setq chan--image-timer
+              (run-at-time 1 nil #'chan--process-image-queue))))
     (switch-to-buffer buffer)))
 
 (defvar chan-thread-mode-map
@@ -271,10 +309,7 @@
   (interactive)
   (let ((pos (point)))
     (dolist (img-data chan--thread-images)
-      (when (and (>= pos (car img-data))
-                 (< pos
-                    (+ (car img-data)
-                       (length (cdr (car (cdr img-data)))))))
+      (when (and (>= pos (car img-data)) (< pos (+ (car img-data) 1)))
         (let* ((thumbnail (car (cdr img-data)))
                (full-size-fn (cdr (cdr img-data)))
                (current-image
@@ -288,6 +323,11 @@
                (if (eq current-image thumbnail)
                    full-size
                  thumbnail))))
+          (setcar
+           (cdr img-data)
+           (if (eq current-image thumbnail)
+               full-size
+             thumbnail))
           (message "Image %s"
                    (if (eq current-image thumbnail)
                        "expanded"
@@ -321,8 +361,10 @@
   (let ((inhibit-read-only t))
     (erase-buffer)
     (let* ((img-data (nth index chan--thread-images))
-           (full-size (funcall (cdr (cdr img-data)))))
-      (insert-image full-size)
+           (full-size
+            (or (car (cdr img-data)) (funcall (cdr (cdr img-data)))))
+           (thumbnail (car (cdr img-data))))
+      (insert-image (or full-size thumbnail))
       (insert
        (propertize (format "\nImage %d of %d"
                            (1+ index)
