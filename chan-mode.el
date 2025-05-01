@@ -299,6 +299,44 @@
          (goto-char (point-min))
          (pop-to-buffer (current-buffer)))))))
 
+(defun chan-mode-insert-catalog-thread (thread)
+  "Insert a single THREAD into the catalog view."
+  (let* ((no (alist-get 'no thread))
+         (replies (alist-get 'replies thread))
+         (images (alist-get 'images thread))
+         (sub (alist-get 'sub thread))
+         (com (alist-get 'com thread))
+         (tim (alist-get 'tim thread))
+         (ext (alist-get 'ext thread))
+         (thumb
+          (when tim
+            (format "https://t.4cdn.org/%s/%ss.jpg"
+                    chan-mode-board
+                    tim))))
+    (insert
+     (propertize (format "Thread %d (%d replies, %d images)\n"
+                         no
+                         (or replies 0)
+                         (or images 0))
+                 'thread-id no 'face 'font-lock-function-name-face))
+    (when thumb
+      (chan-mode-insert-image thumb chan-mode-thumbnail-scale nil))
+    (when sub
+      (insert
+       (propertize (format "Subject: %s\n" (chan-mode-strip-html sub))
+                   'face
+                   'font-lock-keyword-face
+                   'thread-id
+                   no)))
+    (when com
+      (insert
+       (propertize (chan-mode-strip-html com)
+                   'face
+                   'font-lock-string-face
+                   'thread-id
+                   no)))
+    (insert "\n\n")))
+
 ;; Thread view
 (defun chan-mode-open-thread ()
   "Open the thread under point in the catalog view."
@@ -316,11 +354,10 @@
            (let ((inhibit-read-only t))
              (erase-buffer)
              (insert
-              (propertize
-               (format "4chan /%s/ Thread %d\n\n"
-                       chan-mode-board
-                       thread-id)
-               'thread-id thread-id))
+              (propertize (format "4chan /%s/ Thread %d\n\n"
+                                  chan-mode-board
+                                  thread-id)
+                          'thread-id thread-id))
              (dolist (post (alist-get 'posts data))
                (chan-mode-insert-thread-post post thread-id))
              (chan-mode-thread-mode)
@@ -379,7 +416,8 @@
             (goto-char (point-min))
             (when (search-forward "\n\n" nil t)
               (let ((image
-                     (create-image (buffer-substring (point) (point-max))
+                     (create-image (buffer-substring
+                                    (point) (point-max))
                                    nil t
                                    :scale scale)))
                 (insert
