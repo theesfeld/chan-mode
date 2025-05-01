@@ -1,675 +1,382 @@
-;;; chan-mode.el --- Read 4chan boards as feeds in Emacs -*- lexical-binding: t -*-
+;;; chan-viewer.el --- Read-only 4chan viewer for Emacs -*- lexical-binding: t; -*-
 
-;; Author: Blackdream <grim@grim.su>
-;; Version: 1.4
-;; Package-Requires: ((emacs "30.1") (cl-lib "0.5"))
-;; Keywords: comm, multimedia
-;; URL: https://github.com/theesfeld/chan-mode
+;; Author: Your Name <your.email@example.com>
+;; Version: 0.2
+;; Package-Requires: ((emacs "30.1"))
+;; Keywords: hypermedia, 4chan, viewer
+;; URL: https://github.com/yourusername/chan-viewer
+;; License: GPL-3.0-or-later
 
 ;;; Commentary:
-;; A synchronous 4chan board reader for Emacs. Loads current page/thread thumbnails top-to-bottom,
-;; with fixed-size placeholders, enhanced thread view, full-size image toggling, and an image gallery.
+
+;; This package provides a read-only viewer for 4chan boards using the 4chan API.
+;; Features:
+;; - Catalog view with pagination and API-fetched thumbnails
+;; - Thread view with thumbnail/full-size image toggle (RET on image)
+;; - Board selection via minibuffer with completion
+;; - Customizable default board, thumbnail scale, and auto-refresh
+;; - System theming support with font locking
+;; - Simple navigation (q to return to catalog, r to refresh)
+;; Uses Emacs 30.1's native JSON parsing for performance.
+
+;; Usage:
+;; M-x chan-viewer RET to open the catalog view for the default board.
+;; Customize `chan-viewer-board' for the default board (e.g., "g", "pol").
+;; Press C-c b to select a new board in catalog or thread view.
+
+
+;; (use-package chan-viewer
+;;   :ensure t
+;;   :vc (:url "https://github.com/yourusername/chan-viewer" :rev :newest)
+;;   :commands (chan-viewer)
+;;   :custom
+;;   (chan-viewer-board "g" "Default board to view (e.g., 'a', 'g', 'k', 'pol')")
+;;   (chan-viewer-thumbnail-scale 0.5 "Scale factor for thumbnail images")
+;;   (chan-viewer-full-image-scale 1.0 "Scale factor for full-size images")
+;;   (chan-viewer-auto-refresh-interval 0 "Auto-refresh interval in seconds (0 to disable)")
+;;   :bind
+;;   (("C-c 4" . chan-viewer)
+;;    :map chan-mode-map
+;;    ("C-c b" . chan-viewer-select-board)
+;;    ("r" . chan-viewer-refresh)
+;;    :map chan-viewer-catalog-mode-map
+;;    ("n" . chan-viewer-next-page)
+;;    ("p" . chan-viewer-prev-page)
+;;    ("RET" . chan-viewer-open-thread)
+;;    :map chan-viewer-thread-mode-map
+;;    ("q" . chan-viewer-return-to-catalog)
+;;    ("RET" . chan-viewer-toggle-image-size))
+;;   :hook
+;;   ((chan-viewer-catalog-mode . (lambda () (setq buffer-face-mode-face '(:family "monospace"))))
+;;    (chan-viewer-thread-mode . (lambda () (setq buffer-face-mode-face '(:family "monospace")))))
+;;   :config
+;;   (font-lock-mode 1)
+;;   (set-face-attribute 'chan-viewer-op-face nil :background "#2e2e2e" :foreground "#ffcc00")
+;;   (set-face-attribute 'chan-viewer-metadata-face nil :foreground "#888888")
+;;   (set-face-attribute 'chan-viewer-you-face nil :foreground "#ff5555" :weight 'bold))
+
+;;; Code:
 
 (require 'url)
-(require 'json)
-(require 'shr)
-(require 'cl-lib)
+(require 'shr) ;; For rendering HTML content in posts
 
-(defgroup chan-mode nil
-  "Customization group for chan-mode."
-  :group 'comm)
+;; Customizable variables
+(defgroup chan-viewer nil
+  "Read-only 4chan viewer for Emacs."
+  :group 'applications
+  :prefix "chan-viewer-")
 
-(defcustom chan-base-url "https://a.4cdn.org/"
-  "Base URL for 4chan API."
+(defcustom chan-viewer-board "g"
+  "Default 4chan board to view (e.g., 'a', 'g', 'k', 'pol')."
   :type 'string
-  :group 'chan-mode)
+  :group 'chan-viewer)
 
-(defcustom chan-image-base-url "https://i.4cdn.org/"
-  "Base URL for 4chan images."
+(defcustom chan-viewer-catalog-page 1
+  "Current page of the catalog view."
+  :type 'integer
+  :group 'chan-viewer)
+
+(defcustom chan-viewer-api-base "https://a.4cdn.org"
+  "Base URL for the 4chan API."
   :type 'string
-  :group 'chan-mode)
+  :group 'chan-viewer)
 
-(defcustom chan-thumbnail-width 200
-  "Width of thumbnail placeholders."
+(defcustom chan-viewer-thumbnail-scale 0.5
+  "Scale factor for thumbnail images."
+  :type 'float
+  :group 'chan-viewer)
+
+(defcustom chan-viewer-full-image-scale 1.0
+  "Scale factor for full-size images in thread view."
+  :type 'float
+  :group 'chan-viewer)
+
+(defcustom chan-viewer-auto-refresh-interval 0
+  "Interval (seconds) to auto-refresh catalog/thread view. 0 disables."
   :type 'integer
-  :group 'chan-mode)
+  :group 'chan-viewer)
 
-(defcustom chan-thumbnail-height 200
-  "Height of thumbnail placeholders."
-  :type 'integer
-  :group 'chan-mode)
+;; Faces for font locking and theming
+(defface chan-viewer-op-face
+  '((t :inherit font-lock-function-name-face :weight bold :background "#2e2e2e"))
+  "Face for highlighting OP posts in thread view."
+  :group 'chan-viewer)
 
-(defvar chan--boards-cache nil
-  "Cache of available boards.")
-(defvar chan--last-request-time 0
-  "Timestamp of last API request for rate limiting.")
-(defvar chan--current-board nil
-  "Current board being viewed.")
-(defvar chan--current-page 0
-  "Current page of the catalog being viewed.")
+(defface chan-viewer-metadata-face
+  '((t :inherit font-lock-comment-face))
+  "Face for post metadata (e.g., post count, tripcodes)."
+  :group 'chan-viewer)
 
-;;; Utility Functions
-(defun chan--rate-limit-wait ()
-  "Ensure at least 1 second between API requests."
-  (let ((elapsed (- (float-time) chan--last-request-time)))
-    (when (< elapsed 1.0)
-      (sleep-for (- 1.0 elapsed)))
-    (setq chan--last-request-time (float-time))))
+(defface chan-viewer-you-face
+  '((t :inherit font-lock-keyword-face :weight bold))
+  "Face for (You) count in posts."
+  :group 'chan-viewer)
 
-(defun chan--fetch-json (url)
-  "Fetch and parse JSON from URL synchronously with diagnostics."
-  (message "Fetching JSON from: %s" url)
-  (chan--rate-limit-wait)
-  (with-temp-buffer
-    (let ((status (url-insert-file-contents url)))
-      (if (not status)
-          (progn
-            (message "Network failure fetching %s" url)
-            nil)
-        (goto-char (point-min))
-        (message "Raw response (first 500 chars): %s"
-                 (buffer-substring (point-min) (min (point-max) 500)))
-        (let ((http-status
-               (if (looking-at "HTTP/[0-1].[0-1] \\([0-9]+\\)")
-                   (string-to-number (match-string 1))
-                 200)))
-          (message "HTTP status: %d" http-status)
-          (if (>= http-status 400)
-              (progn
-                (message "HTTP error %d fetching %s" http-status url)
-                nil)
-            (goto-char (point-min))
-            (if (re-search-forward "\r?\n\r?\n" nil t)
-                (progn
-                  (message "Found header-body separator at: %d"
-                           (point))
-                  (condition-case err
-                      (let ((json-object-type 'alist)
-                            (json-array-type 'list)
-                            (json-key-type 'symbol))
-                        (let ((result (json-read)))
-                          (message "JSON parsed successfully from %s"
-                                   url)
-                          result))
-                    (error
-                     (message "JSON parsing failed for %s: %s"
-                              url
-                              (error-message-string err))
-                     nil)))
-              (message "No header-body separator; assuming pure JSON")
-              (goto-char (point-min))
-              (condition-case err
-                  (let ((json-object-type 'alist)
-                        (json-array-type 'list)
-                        (json-key-type 'symbol))
-                    (let ((result (json-read)))
-                      (message "JSON parsed successfully from %s" url)
-                      result))
-                (error
-                 (message "JSON parsing failed for %s: %s"
-                          url
-                          (error-message-string err))
-                 nil)))))))))
+;; Buffer names
+(defconst chan-viewer-catalog-buffer "*Chan Catalog*"
+  "Name of the catalog view buffer.")
 
-(defun chan--get-boards ()
-  "Fetch list of boards, caching result."
-  (or chan--boards-cache
-      (setq chan--boards-cache
-            (alist-get
-             'boards
-             (chan--fetch-json
-              (concat chan-base-url "boards.json"))))))
+(defconst chan-viewer-thread-buffer "*Chan Thread*"
+  "Name of the thread view buffer.")
 
-(defun chan--image-url (board tim ext &optional thumbnail)
-  "Construct image URL from BOARD, TIM, and EXT."
-  (when (and tim ext)
-    (if thumbnail
-        (concat
-         chan-image-base-url board "/" (number-to-string tim) "s.jpg")
-      (concat
-       chan-image-base-url board "/" (number-to-string tim) ext))))
+;; Base major mode
+(define-derived-mode chan-mode special-mode "Chan"
+  "Base major mode for 4chan viewer."
+  :group 'chan-viewer
+  (setq buffer-read-only t)
+  (chan-viewer-setup-chan-keybindings))
 
-(defun chan--fetch-image (url &optional full-size)
-  "Fetch image from URL synchronously, return image object or nil."
-  (when url
-    (message "Fetching image from: %s" url)
-    (chan--rate-limit-wait)
-    (let ((buffer (url-retrieve-synchronously url t t 5)))
-      (if (not buffer)
-          (progn
-            (message "Failed to retrieve buffer for %s" url)
-            nil)
-        (with-current-buffer buffer
-          (unwind-protect
-              (condition-case err
-                  (progn
-                    (goto-char (point-min))
-                    (let ((http-status
-                           (if (looking-at
-                                "HTTP/[0-1].[0-1] \\([0-9]+\\)")
-                               (string-to-number (match-string 1))
-                             200)))
-                      (if (>= http-status 400)
-                          (progn
-                            (message
-                             "HTTP error %d fetching image from %s"
-                             http-status url)
-                            nil)
-                        (goto-char (point-min))
-                        (if (re-search-forward "\r?\n\r?\n" nil t)
-                            (message
-                             "Found image header-body separator at: %d"
-                             (point))
-                          (message
-                           "No image header-body separator; assuming pure data"))
-                        (let ((data
-                               (buffer-substring-no-properties
-                                (point) (point-max))))
-                          (if (string-empty-p data)
-                              (progn
-                                (message
-                                 "No image data received from %s"
-                                 url)
-                                nil)
-                            (create-image
-                             data
-                             nil
-                             t
-                             :max-width
-                             (if full-size
-                                 nil
-                               chan-thumbnail-width)
-                             :max-height
-                             (if full-size
-                                 nil
-                               chan-thumbnail-height)))))))
-                (error
-                 (message "Failed to fetch image %s: %s"
-                          url
-                          (error-message-string err))
-                 nil))
-            (kill-buffer buffer)))))))
+;; Derived modes
+(define-derived-mode chan-viewer-catalog-mode chan-mode "Chan-Catalog"
+  "Major mode for 4chan catalog view."
+  :group 'chan-viewer
+  (chan-viewer-setup-catalog-keybindings)
+  (chan-viewer-start-auto-refresh))
 
-;;; Catalog View
-(defvar chan-catalog-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'chan-catalog-open-thread)
-    (define-key map (kbd "n") #'chan-catalog-next-page)
-    (define-key map (kbd "p") #'chan-catalog-prev-page)
-    (define-key map [mouse-1] #'chan-catalog-open-thread-mouse)
-    map)
-  "Keymap for chan-catalog-mode.")
+(define-derived-mode chan-viewer-thread-mode chan-mode "Chan-Thread"
+  "Major mode for 4chan thread view."
+  :group 'chan-viewer
+  (chan-viewer-setup-thread-keybindings)
+  (chan-viewer-start-auto-refresh))
 
-(defun chan-catalog (board &optional page)
-  "Display catalog page PAGE (default 0) for BOARD."
-  (interactive (list
-                (completing-read
-                 "Board: "
-                 (mapcar
-                  (lambda (b)
-                    (alist-get 'board b))
-                  (chan--get-boards)))))
-  (setq chan--current-board board)
-  (setq chan--current-page (or page 0))
-  (let ((catalog
-         (chan--fetch-json
-          (concat chan-base-url board "/catalog.json")))
-        (buffer
-         (get-buffer-create (format "*chan-catalog-%s*" board))))
-    (with-current-buffer buffer
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (chan-catalog-mode)
-        (insert
-         (propertize "Boards: "
-                     'face
-                     '(:weight bold :foreground "cyan")))
-        (dolist (b (chan--get-boards))
-          (let ((board-name (alist-get 'board b)))
-            (insert
-             (propertize (format "/%s/ " board-name)
-                         'face
-                         '(:foreground "blue" :underline t)
-                         'keymap
-                         chan-catalog-mode-map
-                         'board
-                         board-name
-                         'follow-link
-                         t
-                         'mouse-face
-                         'highlight
-                         'action
-                         (lambda (_) (chan-catalog board-name))))))
-        (insert "\n\n")
-        (chan-catalog--insert-page-navigation catalog)
-        (insert "\n\n")
-        (if (null catalog)
-            (error "Failed to fetch catalog data for /%s/" board)
-          (let ((threads
-                 (alist-get
-                  'threads (nth chan--current-page catalog))))
-            (dolist (thread threads)
-              (chan-catalog--insert-thread thread))))
-        (insert "\n")
-        (goto-char (point-min)))
-      (switch-to-buffer buffer))))
+;; Keybindings
+(defun chan-viewer-setup-chan-keybindings ()
+  "Set up keybindings for chan-mode."
+  (let ((map chan-mode-map))
+    (define-key map (kbd "C-c b") #'chan-viewer-select-board)
+    (define-key map (kbd "r") #'chan-viewer-refresh)))
 
-(define-derived-mode
- chan-catalog-mode
- fundamental-mode
- "Chan-Catalog"
- "Major mode for browsing 4chan catalogs.")
+(defun chan-viewer-setup-catalog-keybindings ()
+  "Set up keybindings for catalog mode."
+  (let ((map chan-viewer-catalog-mode-map))
+    (define-key map (kbd "n") #'chan-viewer-next-page)
+    (define-key map (kbd "p") #'chan-viewer-prev-page)
+    (define-key map (kbd "RET") #'chan-viewer-open-thread)))
 
-(defun chan-catalog--insert-thread (thread)
-  "Insert a single THREAD into the catalog."
-  (let ((no (alist-get 'no thread))
-        (sub (or (alist-get 'sub thread) "No Subject"))
-        (time (alist-get 'time thread))
-        (tim (alist-get 'tim thread))
-        (ext (alist-get 'ext thread)))
-    (let ((inhibit-read-only t)
-          (image-url (chan--image-url chan--current-board tim ext t)))
-      (insert
-       (propertize (format "[%d] %s" no sub)
-                   'thread-id
-                   no
-                   'face
-                   '(:foreground "yellow" :underline t)
-                   'keymap
-                   chan-catalog-mode-map
-                   'follow-link
-                   t
-                   'mouse-face
-                   'highlight))
-      (insert " ")
-      (insert
-       (propertize (format "Posted: %s"
-                           (format-time-string "%Y-%m-%d %H:%M:%S"
-                                               time))
-                   'face '(:foreground "green" :height 0.8)))
-      (insert " ")
-      (let ((pos (point)))
-        (insert-image
-         (create-image (make-string 1 ?\s)
-                       nil
-                       t
-                       :width chan-thumbnail-width
-                       :height chan-thumbnail-height))
-        (when image-url
-          (let ((image (chan--fetch-image image-url)))
-            (when image
-              (goto-char pos)
-              (delete-char 1)
-              (insert-image image)))))
-      (insert "\n"))))
+(defun chan-viewer-setup-thread-keybindings ()
+  "Set up keybindings for thread mode."
+  (let ((map chan-viewer-thread-mode-map))
+    (define-key map (kbd "q") #'chan-viewer-return-to-catalog)
+    (define-key map (kbd "RET") #'chan-viewer-toggle-image-size)))
 
-(defun chan-catalog--insert-page-navigation (catalog)
-  "Insert page navigation links for CATALOG."
-  (let ((inhibit-read-only t))
-    (insert
-     (propertize "Navigation: "
-                 'face
-                 '(:weight bold :foreground "cyan")))
-    (dotimes (i (length catalog))
-      (insert
-       (propertize (format "[Page %d]" (1+ i))
-                   'face
-                   (if (= i chan--current-page)
-                       '(:weight bold :foreground "white")
-                     '(:foreground "blue" :underline t))
-                   'keymap
-                   chan-catalog-mode-map
-                   'page
-                   i
-                   'follow-link
-                   t
-                   'mouse-face
-                   'highlight
-                   'action
-                   (lambda (_) (chan-catalog chan--current-board i))))
-      (insert " "))))
+;; API request function
+(defun chan-viewer-fetch-json (url callback)
+  "Fetch JSON from URL and call CALLBACK with parsed data."
+  (url-retrieve
+   url
+   (lambda (status)
+     (if (plist-get status :error)
+         (message "Failed to fetch %s: %s" url (plist-get status :error))
+       (goto-char (point-min))
+       (when (search-forward "\n\n" nil t)
+         (let ((json-data (json-parse-buffer :object-type 'alist)))
+           (funcall callback json-data)))))
+   nil t))
 
-(defun chan-catalog-next-page ()
-  "Go to the next page of the catalog."
+;; Board selection
+(defvar chan-viewer-board-list nil
+  "List of valid 4chan boards.")
+
+(defun chan-viewer-fetch-boards (callback)
+  "Fetch list of valid boards and call CALLBACK."
+  (chan-viewer-fetch-json
+   (format "%s/boards.json" chan-viewer-api-base)
+   (lambda (data)
+     (setq chan-viewer-board-list
+           (mapcar (lambda (board) (alist-get 'board board))
+                   (alist-get 'boards data)))
+     (funcall callback))))
+
+(defun chan-viewer-select-board ()
+  "Prompt for a board in the minibuffer and switch to it."
   (interactive)
-  (let ((catalog
-         (chan--fetch-json
-          (concat
-           chan-base-url chan--current-board "/catalog.json"))))
-    (when (< (1+ chan--current-page) (length catalog))
-      (chan-catalog chan--current-board (1+ chan--current-page)))))
+  (chan-viewer-fetch-boards
+   (lambda ()
+     (let ((board (completing-read "Select board: " chan-viewer-board-list nil t)))
+       (when board
+         (setq chan-viewer-board board)
+         (chan-viewer-render-catalog))))))
 
-(defun chan-catalog-prev-page ()
-  "Go to the previous page of the catalog."
-  (interactive)
-  (when (> chan--current-page 0)
-    (chan-catalog chan--current-board (1- chan--current-page))))
+;; Catalog view
+(defun chan-viewer-render-catalog ()
+  "Render the catalog view for the current board and page."
+  (chan-viewer-fetch-json
+   (format "%s/%s/catalog.json" chan-viewer-api-base chan-viewer-board)
+   (lambda (data)
+     (with-current-buffer (get-buffer-create chan-viewer-catalog-buffer)
+       (let ((inhibit-read-only t))
+         (erase-buffer)
+         (insert (format "4chan /%s/ Catalog (Page %d)\n\n"
+                         chan-viewer-board
+                         chan-viewer-catalog-page))
+         (dolist (page (nth (1- chan-viewer-catalog-page) data))
+           (dolist (thread (alist-get 'threads page))
+             (chan-viewer-insert-catalog-thread thread)))
+         (chan-viewer-catalog-mode)
+         (goto-char (point-min))
+         (pop-to-buffer (current-buffer)))))))
 
-(defun chan-catalog-open-thread ()
-  "Open thread under point."
+(defun chan-viewer-insert-catalog-thread (thread)
+  "Insert a single thread into the catalog view."
+  (let* ((no (alist-get 'no thread))
+         (sub (or (alist-get 'sub thread) "No Subject"))
+         (com (alist-get 'com thread))
+         (replies (alist-get 'replies thread))
+         (images (alist-get 'images thread))
+         (tim (alist-get 'tim thread))
+         (thumb (when tim (format "https://t.4cdn.org/%s/%ss.jpg"
+                                  chan-viewer-board tim))))
+    (insert (propertize (format "[%d] %s (%d replies, %d images)\n"
+                                no sub replies images)
+                        'thread-id no
+                        'face 'link))
+    (when thumb
+      (chan-viewer-insert-image thumb chan-viewer-thumbnail-scale nil))
+    (when com
+      (insert (propertize (chan-viewer-strip-html com)
+                          'face 'font-lock-string-face)))
+    (insert "\n\n")))
+
+;; Thread view
+(defun chan-viewer-open-thread ()
+  "Open the thread under point in the catalog view."
   (interactive)
   (let ((thread-id (get-text-property (point) 'thread-id)))
     (when thread-id
-      (chan-thread chan--current-board thread-id))))
+      (chan-viewer-fetch-json
+       (format "%s/%s/thread/%d.json" chan-viewer-api-base chan-viewer-board thread-id)
+       (lambda (data)
+         (with-current-buffer (get-buffer-create chan-viewer-thread-buffer)
+           (let ((inhibit-read-only t))
+             (erase-buffer)
+             (insert (format "4chan /%s/ Thread %d\n\n"
+                             chan-viewer-board thread-id))
+             (dolist (post (alist-get 'posts data))
+               (chan-viewer-insert-thread-post post thread-id))
+             (chan-viewer-thread-mode)
+             (goto-char (point-min))
+             (pop-to-buffer (current-buffer))))))))))
 
-(defun chan-catalog-open-thread-mouse (event)
-  "Open thread under mouse click EVENT."
-  (interactive "e")
-  (mouse-set-point event)
-  (chan-catalog-open-thread))
+(defun chan-viewer-insert-thread-post (post thread-id)
+  "Insert a single post into the thread view."
+  (let* ((no (alist-get 'no post))
+         (name (or (alist-get 'name post) "Anonymous"))
+         (trip (alist-get 'trip post))
+         (time (alist-get 'time post))
+         (com (alist-get 'com post))
+         (tim (alist-get 'tim post))
+         (ext (alist-get 'ext post))
+         (thumb (when tim (format "https://t.4cdn.org/%s/%ss.jpg" chan-viewer-board tim)))
+         (full (when tim (format "https://i.4cdn.org/%s/%s%s" chan-viewer-board tim ext)))
+         (is-op (eq no thread-id))
+         (you-count (chan-viewer-count-you com)))
+    (insert (propertize (format "Post %d by %s%s [%s] (You: %d)\n"
+                                no name (or trip "") (chan-viewer-format-time time) you-count)
+                        'face (if is-op 'chan-viewer-op-face 'chan-viewer-metadata-face)))
+    (when thumb
+      (chan-viewer-insert-image thumb chan-viewer-thumbnail-scale full))
+    (when com
+      (insert (propertize (chan-viewer-strip-html com)
+                          'face 'font-lock-string-face)))
+    (insert "\n\n")))
 
-;;; Thread View
-(defvar-local chan--thread-images nil
-  "Alist of (position . (thumbnail . full-url)) for images in thread.")
-
-(defvar chan-thread-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "n") #'chan-thread-next)
-    (define-key map (kbd "p") #'chan-thread-prev)
-    (define-key map (kbd "q") #'chan-thread-quit)
-    (define-key map (kbd "e") #'chan-thread-toggle-image-size)
-    (define-key map (kbd "i") #'chan-thread-image-view)
-    (define-key map (kbd "c p") #'chan-thread-copy-post-link)
-    (define-key map (kbd "c t") #'chan-thread-copy-thread-link)
-    (define-key map (kbd "c c") #'chan-thread-copy-post-content)
-    (define-key map [mouse-1] #'chan-thread-toggle-image-size-mouse)
-    map)
-  "Keymap for chan-thread-mode.")
-
-(defun chan-thread (board thread-id)
-  "Display THREAD-ID from BOARD with synchronous thumbnail loading."
-  (let ((thread-json
-         (chan--fetch-json
-          (concat
-           chan-base-url
-           board
-           "/thread/"
-           (number-to-string thread-id)
-           ".json")))
-        (buffer
-         (get-buffer-create
-          (format "*chan-thread-%s-%d*" board thread-id))))
-    (with-current-buffer buffer
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (chan-thread-mode)
-        (insert
-         (propertize (format "Thread /%s/%d\n\n" board thread-id)
-                     'face '(:weight bold :foreground "cyan")))
-        (if (null thread-json)
-            (error
-             "Failed to fetch thread data for /%s/%d" board thread-id)
-          (mapc
-           #'chan-thread--insert-post (alist-get 'posts thread-json)))
-        (goto-char (point-min)))
-      (setq chan--current-board board)
-      (switch-to-buffer buffer))))
-
-(define-derived-mode
- chan-thread-mode
- fundamental-mode
- "Chan-Thread"
- "Major mode for browsing 4chan threads.")
-
-(defun chan-thread--insert-post (post)
-  "Insert a single POST with a box and colored info."
-  (let ((no (alist-get 'no post))
-        (time (alist-get 'time post))
-        (name (or (alist-get 'name post) "Anonymous"))
-        (trip (alist-get 'trip post))
-        (id (alist-get 'id post))
-        (capcode (alist-get 'capcode post))
-        (country (alist-get 'country post))
-        (sub (alist-get 'sub post))
-        (com (or (alist-get 'com post) ""))
-        (tim (alist-get 'tim post))
-        (ext (alist-get 'ext post)))
-    (let ((inhibit-read-only t)
-          (thumbnail-url
-           (chan--image-url chan--current-board tim ext t))
-          (full-url (chan--image-url chan--current-board tim ext))
-          (start (point)))
-      (insert
-       (propertize
-        "┌──────────────────────────────────────────────────┐\n"
-        'face '(:foreground "gray")))
-      (insert
-       (propertize (format "│ Post #%d\n" no)
-                   'face
-                   '(:foreground "yellow")))
-      (insert
-       (propertize (format "│ No: %d " no)
-                   'face
-                   '(:foreground "magenta")))
-      (insert
-       (propertize (format "Time: %s "
-                           (format-time-string "%Y-%m-%d %H:%M:%S"
-                                               time))
-                   'face '(:foreground "green")))
-      (insert
-       (propertize (format "Name: %s%s%s "
-                           name
-                           (if trip
-                               (concat " " trip)
-                             "")
-                           (if capcode
-                               (concat " ## " capcode)
-                             ""))
-                   'face '(:foreground "cyan")))
-      (insert
-       (propertize (format "ID: %s " (or id "N/A"))
-                   'face
-                   '(:foreground "purple")))
-      (insert
-       (propertize (format "Country: %s\n" (or country "N/A"))
-                   'face
-                   '(:foreground "blue")))
-      (when sub
-        (insert
-         (propertize (format "│ Subject: %s\n" sub)
-                     'face
-                     '(:foreground "orange"))))
-      (insert (propertize "│\n" 'face '(:foreground "gray")))
-      (when thumbnail-url
-        (let ((pos (point)))
-          (insert-image
-           (create-image (make-string 1 ?\s)
-                         nil
-                         t
-                         :width chan-thumbnail-width
-                         :height chan-thumbnail-height))
-          (insert " ")
-          (let ((thumbnail (chan--fetch-image thumbnail-url)))
-            (when thumbnail
-              (goto-char pos)
-              (delete-char 1)
-              (insert-image thumbnail)
-              (push (cons pos (cons thumbnail full-url))
-                    chan--thread-images)))))
-      (insert (propertize "│ " 'face '(:foreground "gray")))
-      (chan-thread--insert-comment com)
-      (insert
-       (propertize
-        "└──────────────────────────────────────────────────┘\n\n"
-        'face '(:foreground "gray")))
-      (put-text-property
-       start
-       (point)
-       'chan-post-data
-       (list :no no :thread-id (string-to-number (buffer-name)))))))
-
-(defun chan-thread--insert-comment (com)
-  "Insert comment COM with readable text."
-  (let ((inhibit-read-only t))
-    (if (fboundp 'libxml-parse-html-region)
-        (shr-insert-document
-         (with-temp-buffer
-           (insert com)
-           (libxml-parse-html-region (point-min) (point-max))))
-      (insert (propertize com 'face '(:foreground "white"))))
-    (insert "\n")))
-
-(defun chan-thread-next ()
-  "Move to next post."
-  (interactive)
-  (re-search-forward "┌─" nil t)
-  (forward-line 1))
-
-(defun chan-thread-prev ()
-  "Move to previous post."
-  (interactive)
-  (re-search-backward "┌─" nil t))
-
-(defun chan-thread-quit ()
-  "Quit thread view and return to catalog."
-  (interactive)
-  (kill-buffer)
-  (chan-catalog chan--current-board chan--current-page))
-
-(defun chan-thread-toggle-image-size ()
-  "Toggle image under point between thumbnail and full size."
-  (interactive)
-  (let ((pos (point)))
-    (dolist (img-data chan--thread-images)
-      (when (and (>= pos (car img-data))
-                 (< pos (+ (car img-data) chan-thumbnail-width)))
-        (let ((thumbnail (car (cdr img-data)))
-              (full-url (cdr (cdr img-data)))
-              (current-image
-               (get-text-property (car img-data) 'display)))
-          (let ((full-image (chan--fetch-image full-url t)))
-            (when full-image
-              (goto-char (car img-data))
-              (let ((inhibit-read-only t))
-                (delete-char 1)
-                (insert-image
-                 (if (eq current-image thumbnail)
-                     full-image
-                   thumbnail)))
-              (setcar
-               (cdr img-data)
-               (if (eq current-image thumbnail)
-                   full-image
-                 thumbnail))
-              (message "Image %s"
-                       (if (eq current-image thumbnail)
-                           "expanded"
-                         "shrunk")))))))))
-
-(defun chan-thread-toggle-image-size-mouse (event)
-  "Toggle image under mouse click EVENT."
-  (interactive "e")
-  (mouse-set-point event)
-  (chan-thread-toggle-image-size))
-
-(defun chan-thread-copy-post-link ()
-  "Copy link to post under point."
-  (interactive)
-  (let* ((data (get-text-property (point) 'chan-post-data))
-         (no (plist-get data :no))
-         (thread-id (plist-get data :thread-id)))
-    (when (and no thread-id)
-      (let ((link
-             (format "https://boards.4chan.org/%s/thread/%d#p%d"
-                     chan--current-board
-                     thread-id
-                     no)))
-        (kill-new link)
-        (message "Copied post link: %s" link)))))
-
-(defun chan-thread-copy-thread-link ()
-  "Copy link to current thread."
-  (interactive)
-  (let ((thread-id (string-to-number (buffer-name))))
-    (let ((link
-           (format "https://boards.4chan.org/%s/thread/%d"
-                   chan--current-board
-                   thread-id)))
-      (kill-new link)
-      (message "Copied thread link: %s" link))))
-
-(defun chan-thread-copy-post-content ()
-  "Copy content of post under point."
-  (interactive)
-  (let ((start (save-excursion (re-search-backward "┌─" nil t)))
-        (end (save-excursion (re-search-forward "└─" nil t))))
-    (when (and start end)
-      (let ((content (buffer-substring-no-properties start end)))
-        (kill-new content)
-        (message "Copied post content")))))
-
-;;; Image View Mode
-(defvar-local chan--image-view-index 0
-  "Current image index in image view.")
-
-(defvar chan-image-view-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "<right>") #'chan-image-view-next)
-    (define-key map (kbd "<left>") #'chan-image-view-prev)
-    (define-key map (kbd "q") #'kill-this-buffer)
-    map)
-  "Keymap for chan-image-view-mode.")
-
-(defun chan-thread-image-view ()
-  "Open image-only view of current thread with full-size images."
-  (interactive)
-  (unless chan--thread-images
-    (user-error "No images in this thread"))
-  (let ((buffer
-         (get-buffer-create
-          (format "*chan-images-%s-%d*"
-                  chan--current-board
-                  (string-to-number (buffer-name))))))
-    (with-current-buffer buffer
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (chan-image-view-mode)
-        (chan--image-view-show-image 0))
-      (switch-to-buffer buffer))))
-
-(define-derived-mode
- chan-image-view-mode
- fundamental-mode
- "Chan-Image-View"
- "Major mode for viewing full-size thread images.")
-
-(defun chan--image-view-show-image (index)
-  "Show full-size image at INDEX in image view."
-  (let ((inhibit-read-only t))
-    (erase-buffer)
-    (let* ((img-data (nth index chan--thread-images))
-           (full-url (cdr (cdr img-data)))
-           (full-image (chan--fetch-image full-url t)))
-      (when full-image
-        (insert-image full-image)
-        (insert
-         (propertize (format "\nImage %d of %d"
-                             (1+ index)
-                             (length chan--thread-images))
-                     'face '(:foreground "cyan" :height 0.8)))
+;; Image handling
+(defun chan-viewer-insert-image (url scale full-url)
+  "Insert image from URL with SCALE, optionally with FULL-URL for toggling."
+  (let ((buffer (url-retrieve-synchronously url t)))
+    (when buffer
+      (with-current-buffer buffer
         (goto-char (point-min))
-        (setq chan--image-view-index index)))))
+        (when (search-forward "\n\n" nil t)
+          (let ((image (create-image
+                        (buffer-substring (point) (point-max))
+                        nil t :scale scale)))
+            (insert (propertize
+                     " "
+                     'display image
+                     'image-url url
+                     'full-url full-url
+                     'current-scale scale))))))))
 
-(defun chan-image-view-next ()
-  "Show next image."
+(defun chan-viewer-toggle-image-size ()
+  "Toggle between thumbnail and full-size image at point."
   (interactive)
-  (when (< (1+ chan--image-view-index) (length chan--thread-images))
-    (chan--image-view-show-image (1+ chan--image-view-index))))
+  (let ((url (get-text-property (point) 'image-url))
+        (full-url (get-text-property (point) 'full-url))
+        (current-scale (get-text-property (point) 'current-scale)))
+    (when (and url full-url)
+      (let ((inhibit-read-only t)
+            (new-url (if (equal url full-url) (replace-regexp-in-string "i\\.4cdn" "t.4cdn" url) full-url))
+            (new-scale (if (equal url full-url) chan-viewer-thumbnail-scale chan-viewer-full-image-scale)))
+        (delete-char 1)
+        (chan-viewer-insert-image new-url new-scale full-url)))))
 
-(defun chan-image-view-prev ()
-  "Show previous image."
+;; Utility functions
+(defun chan-viewer-strip-html (html)
+  "Strip HTML tags from HTML string."
+  (with-temp-buffer
+    (insert html)
+    (shr-insert-document (libxml-parse-html-region (point-min) (point-max)))
+    (buffer-string)))
+
+(defun chan-viewer-count-you (text)
+  "Count occurrences of '(You)' in TEXT."
+  (if text
+      (with-temp-buffer
+        (insert text)
+        (how-many "(You)" (point-min) (point-max)))
+    0))
+
+(defun chan-viewer-format-time (timestamp)
+  "Format Unix TIMESTAMP to human-readable string."
+  (format-time-string "%Y-%m-%d %H:%M:%S" (seconds-to-time timestamp)))
+
+;; Pagination
+(defun chan-viewer-next-page ()
+  "Go to the next catalog page."
   (interactive)
-  (when (> chan--image-view-index 0)
-    (chan--image-view-show-image (1- chan--image-view-index))))
+  (setq chan-viewer-catalog-page (1+ chan-viewer-catalog-page))
+  (chan-viewer-render-catalog))
 
-;;; Entry Point
-(defun chan-mode-start ()
-  "Start chan-mode with a simple catalog."
+(defun chan-viewer-prev-page ()
+  "Go to the previous catalog page."
   (interactive)
-  (unless (image-type-available-p 'jpeg)
-    (error
-     "Emacs lacks JPEG support. Install a version with image support."))
-  (chan-catalog "g"))
+  (when (> chan-viewer-catalog-page 1)
+    (setq chan-viewer-catalog-page (1- chan-viewer-catalog-page))
+    (chan-viewer-render-catalog)))
 
-(provide 'chan-mode)
-;;; chan-mode.el ends here
+;; Refresh
+(defun chan-viewer-refresh ()
+  "Refresh the current view (catalog or thread)."
+  (interactive)
+  (cond
+   ((eq major-mode 'chan-viewer-catalog-mode)
+    (chan-viewer-render-catalog))
+   ((eq major-mode 'chan-viewer-thread-mode)
+    (let ((thread-id (get-text-property (point-min) 'thread-id)))
+      (when thread-id
+        (chan-viewer-open-thread))))))
+
+(defun chan-viewer-start-auto-refresh ()
+  "Start auto-refresh timer if interval is set."
+  (when (> chan-viewer-auto-refresh-interval 0)
+    (run-at-time chan-viewer-auto-refresh-interval
+                 chan-viewer-auto-refresh-interval
+                 #'chan-viewer-refresh)))
+
+;; Navigation
+(defun chan-viewer-return-to-catalog ()
+  "Return to the catalog view from the thread view."
+  (interactive)
+  (kill-this-buffer)
+  (chan-viewer-render-catalog))
+
+;; Entry point
+;;;###autoload
+(defun chan-viewer ()
+  "Start the 4chan viewer."
+  (interactive)
+  (chan-viewer-render-catalog))
+
+(provide 'chan-viewer)
+;;; chan-viewer.el ends here
