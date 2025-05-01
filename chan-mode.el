@@ -1,4 +1,4 @@
-;;; chan-viewer.el --- Read-only 4chan viewer for Emacs -*- lexical-binding: t; -*-
+;;; chan-mode.el --- Read-only 4chan viewer for Emacs -*- lexical-binding: t; -*-
 
 ;; Author: Your Name <your.email@example.com>
 ;; Version: 0.2
@@ -20,12 +20,12 @@
 ;; Uses Emacs 30.1's native JSON parsing for performance.
 
 ;; Usage:
-;; M-x chan-viewer RET to open the catalog view for the default board.
-;; Customize `chan-viewer-board' for the default board (e.g., "g", "pol").
+;; M-x chan-mode RET to open the catalog view for the default board.
+;; Customize `chan-mode-board' for the default board (e.g., "g", "pol").
 ;; Press C-c b to select a new board in catalog or thread view.
 
 
-;; (use-package chan-viewer
+;; (use-package chan-mode
 ;;   :ensure t
 ;;   :vc (:url "https://github.com/yourusername/chan-mode" :rev :newest)
 ;;   :commands (chan-mode)
@@ -316,9 +316,11 @@
            (let ((inhibit-read-only t))
              (erase-buffer)
              (insert
-              (format "4chan /%s/ Thread %d\n\n"
-                      chan-mode-board
-                      thread-id))
+              (propertize
+               (format "4chan /%s/ Thread %d\n\n"
+                       chan-mode-board
+                       thread-id)
+               'thread-id thread-id))
              (dolist (post (alist-get 'posts data))
                (chan-mode-insert-thread-post post thread-id))
              (chan-mode-thread-mode)
@@ -370,25 +372,27 @@
 ;; Image handling
 (defun chan-mode-insert-image (url scale full-url)
   "Insert image from URL with SCALE, optionally with FULL-URL for toggling."
-  (let ((buffer (url-retrieve-synchronously url t)))
-    (when buffer
-      (with-current-buffer buffer
-        (goto-char (point-min))
-        (when (search-forward "\n\n" nil t)
-          (let ((image
-                 (create-image (buffer-substring (point) (point-max))
-                               nil t
-                               :scale scale)))
-            (insert
-             (propertize " "
-                         'display
-                         image
-                         'image-url
-                         url
-                         'full-url
-                         full-url
-                         'current-scale
-                         scale))))))))
+  (condition-case err
+      (let ((buffer (url-retrieve-synchronously url t)))
+        (when buffer
+          (with-current-buffer buffer
+            (goto-char (point-min))
+            (when (search-forward "\n\n" nil t)
+              (let ((image
+                     (create-image (buffer-substring (point) (point-max))
+                                   nil t
+                                   :scale scale)))
+                (insert
+                 (propertize " "
+                             'display
+                             image
+                             'image-url
+                             url
+                             'full-url
+                             full-url
+                             'current-scale
+                             scale)))))))
+    (error (insert (format "[Image loading failed: %s]" err)))))
 
 (defun chan-mode-toggle-image-size ()
   "Toggle between thumbnail and full-size image at point."
@@ -412,11 +416,13 @@
 ;; Utility functions
 (defun chan-mode-strip-html (html)
   "Strip HTML tags from HTML string."
-  (with-temp-buffer
-    (insert html)
-    (shr-insert-document
-     (libxml-parse-html-region (point-min) (point-max)))
-    (buffer-string)))
+  (if html
+      (with-temp-buffer
+        (insert html)
+        (shr-insert-document
+         (libxml-parse-html-region (point-min) (point-max)))
+        (buffer-string))
+    ""))
 
 (defun chan-mode-count-you (text)
   "Count occurrences of '(You)' in TEXT."
