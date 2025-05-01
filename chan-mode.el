@@ -59,6 +59,7 @@
 
 (require 'url)
 (require 'shr) ;; For rendering HTML content in posts
+(require 'json)
 
 ;; Customizable variables
 (defgroup chan-mode nil
@@ -217,9 +218,66 @@
          (setq chan-mode-board board)
          (chan-mode-render-catalog))))))
 
+;; API request function
+(defun chan-mode-fetch-json (url callback)
+  "Fetch JSON from URL and call CALLBACK with parsed data."
+  (message "Fetching %s..." url) ;; Debugging feedback
+  (url-retrieve
+   url
+   (lambda (status)
+     (if (plist-get status :error)
+         (progn
+           (message "Failed to fetch %s: %s"
+                    url
+                    (plist-get status :error))
+           (with-current-buffer (get-buffer-create
+                                 chan-mode-catalog-buffer)
+             (let ((inhibit-read-only t))
+               (erase-buffer)
+               (insert
+                (format "Error: Failed to fetch catalog from %s\n"
+                        url))
+               (chan-mode-catalog-mode)
+               (pop-to-buffer (current-buffer)))))
+       (goto-char (point-min))
+       (if (search-forward "\n\n" nil t)
+           (let ((json-data
+                  (condition-case err
+                      (json-parse-buffer :object-type 'alist)
+                    (error
+                     (message "JSON parsing error: %s" err) nil))))
+             (if json-data
+                 (funcall callback json-data)
+               (with-current-buffer (get-buffer-create
+                                     chan-mode-catalog-buffer)
+                 (let ((inhibit-read-only t))
+                   (erase-buffer)
+                   (insert "Error: Failed to parse JSON data\n")
+                   (chan-mode-catalog-mode)
+                   (pop-to-buffer (current-buffer))))))
+         (message "No valid JSON data found in response")
+         (with-current-buffer (get-buffer-create
+                               chan-mode-catalog-buffer)
+           (let ((inhibit-read-only t))
+             (erase-buffer)
+             (insert "Error: No valid JSON data in response\n")
+             (chan-mode-catalog-mode)
+             (pop-to-buffer (current-buffer)))))))
+   nil t))
+
 ;; Catalog view
 (defun chan-mode-render-catalog ()
-  "Render the catalog view for the current board and page."
+  "Render the catalog view for the current board and page in a new buffer."
+  (let ((buffer (get-buffer-create chan-mode-catalog-buffer)))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert
+         (format "Loading 4chan /%s/ Catalog (Page %d)...\n"
+                 chan-mode-board
+                 chan-mode-catalog-page))
+        (chan-mode-catalog-mode)))
+    (pop-to-buffer buffer))
   (chan-mode-fetch-json
    (format "%s/%s/catalog.json" chan-mode-api-base chan-mode-board)
    (lambda (data)
@@ -230,41 +288,16 @@
           (format "4chan /%s/ Catalog (Page %d)\n\n"
                   chan-mode-board
                   chan-mode-catalog-page))
-         (dolist (page (nth (1- chan-mode-catalog-page) data))
-           (dolist (thread (alist-get 'threads page))
-             (chan-mode-insert-catalog-thread thread)))
+         (let ((threads
+                (alist-get
+                 'threads (nth (1- chan-mode-catalog-page) data))))
+           (if threads
+               (dolist (thread threads)
+                 (chan-mode-insert-catalog-thread thread))
+             (insert "No threads found on this page.\n")))
          (chan-mode-catalog-mode)
          (goto-char (point-min))
          (pop-to-buffer (current-buffer)))))))
-
-(defun chan-mode-insert-catalog-thread (thread)
-  "Insert a single THREAD into the catalog view."
-  (let* ((no (alist-get 'no thread))
-         (sub (or (alist-get 'sub thread) "No Subject"))
-         (com (alist-get 'com thread))
-         (replies (alist-get 'replies thread))
-         (images (alist-get 'images thread))
-         (tim (alist-get 'tim thread))
-         (thumb
-          (when tim
-            (format "https://t.4cdn.org/%s/%ss.jpg"
-                    chan-mode-board
-                    tim))))
-    (insert
-     (propertize (format "[%d] %s (%d replies, %d images)\n"
-                         no
-                         sub
-                         replies
-                         images)
-                 'thread-id no 'face 'link))
-    (when thumb
-      (chan-mode-insert-image thumb chan-mode-thumbnail-scale nil))
-    (when com
-      (insert
-       (propertize (chan-mode-strip-html com)
-                   'face
-                   'font-lock-string-face)))
-    (insert "\n\n")))
 
 ;; Thread view
 (defun chan-mode-open-thread ()
