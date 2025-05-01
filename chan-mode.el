@@ -98,7 +98,10 @@
 
 ;; Faces for font locking and theming
 (defface chan-viewer-op-face
-  '((t :inherit font-lock-function-name-face :weight bold :background "#2e2e2e"))
+  '((t
+     :inherit font-lock-function-name-face
+     :weight bold
+     :background "#2e2e2e"))
   "Face for highlighting OP posts in thread view."
   :group 'chan-viewer)
 
@@ -120,24 +123,36 @@
   "Name of the thread view buffer.")
 
 ;; Base major mode
-(define-derived-mode chan-mode special-mode "Chan"
-  "Base major mode for 4chan viewer."
-  :group 'chan-viewer
-  (setq buffer-read-only t)
-  (chan-viewer-setup-chan-keybindings))
+(define-derived-mode
+ chan-mode
+ special-mode
+ "Chan"
+ "Base major mode for 4chan viewer."
+ :group
+ 'chan-viewer
+ (setq buffer-read-only t)
+ (chan-viewer-setup-chan-keybindings))
 
 ;; Derived modes
-(define-derived-mode chan-viewer-catalog-mode chan-mode "Chan-Catalog"
-  "Major mode for 4chan catalog view."
-  :group 'chan-viewer
-  (chan-viewer-setup-catalog-keybindings)
-  (chan-viewer-start-auto-refresh))
+(define-derived-mode
+ chan-viewer-catalog-mode
+ chan-mode
+ "Chan-Catalog"
+ "Major mode for 4chan catalog view."
+ :group
+ 'chan-viewer
+ (chan-viewer-setup-catalog-keybindings)
+ (chan-viewer-start-auto-refresh))
 
-(define-derived-mode chan-viewer-thread-mode chan-mode "Chan-Thread"
-  "Major mode for 4chan thread view."
-  :group 'chan-viewer
-  (chan-viewer-setup-thread-keybindings)
-  (chan-viewer-start-auto-refresh))
+(define-derived-mode
+ chan-viewer-thread-mode
+ chan-mode
+ "Chan-Thread"
+ "Major mode for 4chan thread view."
+ :group
+ 'chan-viewer
+ (chan-viewer-setup-thread-keybindings)
+ (chan-viewer-start-auto-refresh))
 
 ;; Keybindings
 (defun chan-viewer-setup-chan-keybindings ()
@@ -166,7 +181,9 @@
    url
    (lambda (status)
      (if (plist-get status :error)
-         (message "Failed to fetch %s: %s" url (plist-get status :error))
+         (message "Failed to fetch %s: %s"
+                  url
+                  (plist-get status :error))
        (goto-char (point-min))
        (when (search-forward "\n\n" nil t)
          (let ((json-data (json-parse-buffer :object-type 'alist)))
@@ -183,8 +200,9 @@
    (format "%s/boards.json" chan-viewer-api-base)
    (lambda (data)
      (setq chan-viewer-board-list
-           (mapcar (lambda (board) (alist-get 'board board))
-                   (alist-get 'boards data)))
+           (mapcar
+            (lambda (board) (alist-get 'board board))
+            (alist-get 'boards data)))
      (funcall callback))))
 
 (defun chan-viewer-select-board ()
@@ -192,7 +210,9 @@
   (interactive)
   (chan-viewer-fetch-boards
    (lambda ()
-     (let ((board (completing-read "Select board: " chan-viewer-board-list nil t)))
+     (let ((board
+            (completing-read "Select board: " chan-viewer-board-list
+                             nil t)))
        (when board
          (setq chan-viewer-board board)
          (chan-viewer-render-catalog))))))
@@ -201,14 +221,18 @@
 (defun chan-viewer-render-catalog ()
   "Render the catalog view for the current board and page."
   (chan-viewer-fetch-json
-   (format "%s/%s/catalog.json" chan-viewer-api-base chan-viewer-board)
+   (format "%s/%s/catalog.json"
+           chan-viewer-api-base
+           chan-viewer-board)
    (lambda (data)
-     (with-current-buffer (get-buffer-create chan-viewer-catalog-buffer)
+     (with-current-buffer (get-buffer-create
+                           chan-viewer-catalog-buffer)
        (let ((inhibit-read-only t))
          (erase-buffer)
-         (insert (format "4chan /%s/ Catalog (Page %d)\n\n"
-                         chan-viewer-board
-                         chan-viewer-catalog-page))
+         (insert
+          (format "4chan /%s/ Catalog (Page %d)\n\n"
+                  chan-viewer-board
+                  chan-viewer-catalog-page))
          (dolist (page (nth (1- chan-viewer-catalog-page) data))
            (dolist (thread (alist-get 'threads page))
              (chan-viewer-insert-catalog-thread thread)))
@@ -224,17 +248,26 @@
          (replies (alist-get 'replies thread))
          (images (alist-get 'images thread))
          (tim (alist-get 'tim thread))
-         (thumb (when tim (format "https://t.4cdn.org/%s/%ss.jpg"
-                                  chan-viewer-board tim))))
-    (insert (propertize (format "[%d] %s (%d replies, %d images)\n"
-                                no sub replies images)
-                        'thread-id no
-                        'face 'link))
+         (thumb
+          (when tim
+            (format "https://t.4cdn.org/%s/%ss.jpg"
+                    chan-viewer-board
+                    tim))))
+    (insert
+     (propertize (format "[%d] %s (%d replies, %d images)\n"
+                         no
+                         sub
+                         replies
+                         images)
+                 'thread-id no 'face 'link))
     (when thumb
-      (chan-viewer-insert-image thumb chan-viewer-thumbnail-scale nil))
+      (chan-viewer-insert-image
+       thumb chan-viewer-thumbnail-scale nil))
     (when com
-      (insert (propertize (chan-viewer-strip-html com)
-                          'face 'font-lock-string-face)))
+      (insert
+       (propertize (chan-viewer-strip-html com)
+                   'face
+                   'font-lock-string-face)))
     (insert "\n\n")))
 
 ;; Thread view
@@ -244,18 +277,24 @@
   (let ((thread-id (get-text-property (point) 'thread-id)))
     (when thread-id
       (chan-viewer-fetch-json
-       (format "%s/%s/thread/%d.json" chan-viewer-api-base chan-viewer-board thread-id)
+       (format "%s/%s/thread/%d.json"
+               chan-viewer-api-base
+               chan-viewer-board
+               thread-id)
        (lambda (data)
-         (with-current-buffer (get-buffer-create chan-viewer-thread-buffer)
+         (with-current-buffer (get-buffer-create
+                               chan-viewer-thread-buffer)
            (let ((inhibit-read-only t))
              (erase-buffer)
-             (insert (format "4chan /%s/ Thread %d\n\n"
-                             chan-viewer-board thread-id))
+             (insert
+              (format "4chan /%s/ Thread %d\n\n"
+                      chan-viewer-board
+                      thread-id))
              (dolist (post (alist-get 'posts data))
                (chan-viewer-insert-thread-post post thread-id))
              (chan-viewer-thread-mode)
              (goto-char (point-min))
-             (pop-to-buffer (current-buffer))))))))))
+             (pop-to-buffer (current-buffer)))))))))
 
 (defun chan-viewer-insert-thread-post (post thread-id)
   "Insert a single post into the thread view."
@@ -266,18 +305,38 @@
          (com (alist-get 'com post))
          (tim (alist-get 'tim post))
          (ext (alist-get 'ext post))
-         (thumb (when tim (format "https://t.4cdn.org/%s/%ss.jpg" chan-viewer-board tim)))
-         (full (when tim (format "https://i.4cdn.org/%s/%s%s" chan-viewer-board tim ext)))
+         (thumb
+          (when tim
+            (format "https://t.4cdn.org/%s/%ss.jpg"
+                    chan-viewer-board
+                    tim)))
+         (full
+          (when tim
+            (format "https://i.4cdn.org/%s/%s%s"
+                    chan-viewer-board
+                    tim
+                    ext)))
          (is-op (eq no thread-id))
          (you-count (chan-viewer-count-you com)))
-    (insert (propertize (format "Post %d by %s%s [%s] (You: %d)\n"
-                                no name (or trip "") (chan-viewer-format-time time) you-count)
-                        'face (if is-op 'chan-viewer-op-face 'chan-viewer-metadata-face)))
+    (insert
+     (propertize (format "Post %d by %s%s [%s] (You: %d)\n"
+                         no
+                         name
+                         (or trip "")
+                         (chan-viewer-format-time time)
+                         you-count)
+                 'face
+                 (if is-op
+                     'chan-viewer-op-face
+                   'chan-viewer-metadata-face)))
     (when thumb
-      (chan-viewer-insert-image thumb chan-viewer-thumbnail-scale full))
+      (chan-viewer-insert-image
+       thumb chan-viewer-thumbnail-scale full))
     (when com
-      (insert (propertize (chan-viewer-strip-html com)
-                          'face 'font-lock-string-face)))
+      (insert
+       (propertize (chan-viewer-strip-html com)
+                   'face
+                   'font-lock-string-face)))
     (insert "\n\n")))
 
 ;; Image handling
@@ -288,15 +347,20 @@
       (with-current-buffer buffer
         (goto-char (point-min))
         (when (search-forward "\n\n" nil t)
-          (let ((image (create-image
-                        (buffer-substring (point) (point-max))
-                        nil t :scale scale)))
-            (insert (propertize
-                     " "
-                     'display image
-                     'image-url url
-                     'full-url full-url
-                     'current-scale scale))))))))
+          (let ((image
+                 (create-image (buffer-substring (point) (point-max))
+                               nil t
+                               :scale scale)))
+            (insert
+             (propertize " "
+                         'display
+                         image
+                         'image-url
+                         url
+                         'full-url
+                         full-url
+                         'current-scale
+                         scale))))))))
 
 (defun chan-viewer-toggle-image-size ()
   "Toggle between thumbnail and full-size image at point."
@@ -306,8 +370,14 @@
         (current-scale (get-text-property (point) 'current-scale)))
     (when (and url full-url)
       (let ((inhibit-read-only t)
-            (new-url (if (equal url full-url) (replace-regexp-in-string "i\\.4cdn" "t.4cdn" url) full-url))
-            (new-scale (if (equal url full-url) chan-viewer-thumbnail-scale chan-viewer-full-image-scale)))
+            (new-url
+             (if (equal url full-url)
+                 (replace-regexp-in-string "i\\.4cdn" "t.4cdn" url)
+               full-url))
+            (new-scale
+             (if (equal url full-url)
+                 chan-viewer-thumbnail-scale
+               chan-viewer-full-image-scale)))
         (delete-char 1)
         (chan-viewer-insert-image new-url new-scale full-url)))))
 
@@ -316,7 +386,8 @@
   "Strip HTML tags from HTML string."
   (with-temp-buffer
     (insert html)
-    (shr-insert-document (libxml-parse-html-region (point-min) (point-max)))
+    (shr-insert-document
+     (libxml-parse-html-region (point-min) (point-max)))
     (buffer-string)))
 
 (defun chan-viewer-count-you (text)
@@ -329,7 +400,8 @@
 
 (defun chan-viewer-format-time (timestamp)
   "Format Unix TIMESTAMP to human-readable string."
-  (format-time-string "%Y-%m-%d %H:%M:%S" (seconds-to-time timestamp)))
+  (format-time-string "%Y-%m-%d %H:%M:%S"
+                      (seconds-to-time timestamp)))
 
 ;; Pagination
 (defun chan-viewer-next-page ()
@@ -360,9 +432,10 @@
 (defun chan-viewer-start-auto-refresh ()
   "Start auto-refresh timer if interval is set."
   (when (> chan-viewer-auto-refresh-interval 0)
-    (run-at-time chan-viewer-auto-refresh-interval
-                 chan-viewer-auto-refresh-interval
-                 #'chan-viewer-refresh)))
+    (run-at-time
+     chan-viewer-auto-refresh-interval
+     chan-viewer-auto-refresh-interval
+     #'chan-viewer-refresh)))
 
 ;; Navigation
 (defun chan-viewer-return-to-catalog ()
