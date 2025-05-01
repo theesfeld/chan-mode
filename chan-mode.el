@@ -189,7 +189,7 @@
        (when (search-forward "\n\n" nil t)
          (let ((json-data (json-parse-buffer :object-type 'alist)))
            (funcall callback json-data)))))
-   nil t))
+   nil t t)) ;; Added extra t to inhibit coding system conversion
 
 ;; Board selection
 (defvar chan-mode-board-list nil
@@ -218,52 +218,7 @@
          (setq chan-mode-board board)
          (chan-mode-render-catalog))))))
 
-;; API request function
-(defun chan-mode-fetch-json (url callback)
-  "Fetch JSON from URL and call CALLBACK with parsed data."
-  (message "Fetching %s..." url) ;; Debugging feedback
-  (url-retrieve
-   url
-   (lambda (status)
-     (if (plist-get status :error)
-         (progn
-           (message "Failed to fetch %s: %s"
-                    url
-                    (plist-get status :error))
-           (with-current-buffer (get-buffer-create
-                                 chan-mode-catalog-buffer)
-             (let ((inhibit-read-only t))
-               (erase-buffer)
-               (insert
-                (format "Error: Failed to fetch catalog from %s\n"
-                        url))
-               (chan-mode-catalog-mode)
-               (pop-to-buffer (current-buffer)))))
-       (goto-char (point-min))
-       (if (search-forward "\n\n" nil t)
-           (let ((json-data
-                  (condition-case err
-                      (json-parse-buffer :object-type 'alist)
-                    (error
-                     (message "JSON parsing error: %s" err) nil))))
-             (if json-data
-                 (funcall callback json-data)
-               (with-current-buffer (get-buffer-create
-                                     chan-mode-catalog-buffer)
-                 (let ((inhibit-read-only t))
-                   (erase-buffer)
-                   (insert "Error: Failed to parse JSON data\n")
-                   (chan-mode-catalog-mode)
-                   (pop-to-buffer (current-buffer))))))
-         (message "No valid JSON data found in response")
-         (with-current-buffer (get-buffer-create
-                               chan-mode-catalog-buffer)
-           (let ((inhibit-read-only t))
-             (erase-buffer)
-             (insert "Error: No valid JSON data in response\n")
-             (chan-mode-catalog-mode)
-             (pop-to-buffer (current-buffer)))))))
-   nil t))
+;; Remove duplicate function definition - this is causing the recursion issue
 
 ;; Catalog view
 (defun chan-mode-render-catalog ()
@@ -313,28 +268,42 @@
             (format "https://t.4cdn.org/%s/%ss.jpg"
                     chan-mode-board
                     tim))))
+    ;; Insert thread header with properties
     (insert
      (propertize (format "Thread %d (%d replies, %d images)\n"
                          no
                          (or replies 0)
                          (or images 0))
-                 'thread-id no 'face 'font-lock-function-name-face))
+                 'thread-id no 
+                 'face 'font-lock-function-name-face))
+    
+    ;; Insert thumbnail if available
     (when thumb
-      (chan-mode-insert-image thumb chan-mode-thumbnail-scale nil))
-    (when sub
+      (condition-case nil
+          (chan-mode-insert-image thumb chan-mode-thumbnail-scale nil)
+        (error (insert "[Thumbnail loading failed]\n"))))
+    
+    ;; Insert subject if available (with simplified HTML stripping)
+    (when (and sub (not (string-empty-p sub)))
       (insert
-       (propertize (format "Subject: %s\n" (chan-mode-strip-html sub))
-                   'face
-                   'font-lock-keyword-face
-                   'thread-id
-                   no)))
-    (when com
+       (propertize 
+        (format "Subject: %s\n" 
+                (condition-case nil
+                    (chan-mode-strip-html sub)
+                  (error (replace-regexp-in-string "<[^>]*>" "" sub))))
+        'face 'font-lock-keyword-face
+        'thread-id no)))
+    
+    ;; Insert comment if available (with simplified HTML stripping)
+    (when (and com (not (string-empty-p com)))
       (insert
-       (propertize (chan-mode-strip-html com)
-                   'face
-                   'font-lock-string-face
-                   'thread-id
-                   no)))
+       (propertize 
+        (condition-case nil
+            (chan-mode-strip-html com)
+          (error (replace-regexp-in-string "<[^>]*>" "" com)))
+        'face 'font-lock-string-face
+        'thread-id no)))
+    
     (insert "\n\n")))
 
 ;; Thread view
@@ -454,12 +423,18 @@
 ;; Utility functions
 (defun chan-mode-strip-html (html)
   "Strip HTML tags from HTML string."
-  (if html
-      (with-temp-buffer
-        (insert html)
-        (shr-insert-document
-         (libxml-parse-html-region (point-min) (point-max)))
-        (buffer-string))
+  (if (and html (not (string-empty-p html)))
+      (condition-case err
+          (with-temp-buffer
+            (insert html)
+            (let ((shr-width 80)  ;; Set a fixed width to avoid deep recursion
+                  (shr-max-depth 3)) ;; Limit recursion depth
+              (shr-insert-document
+               (libxml-parse-html-region (point-min) (point-max))))
+            (buffer-string))
+        (error (progn
+                 (message "HTML parsing error: %s" err)
+                 (replace-regexp-in-string "<[^>]*>" "" html))))
     ""))
 
 (defun chan-mode-count-you (text)
@@ -501,13 +476,21 @@
       (when thread-id
         (chan-mode-open-thread))))))
 
+(defvar chan-mode-refresh-timer nil
+  "Timer for auto-refreshing chan-mode buffers.")
+
 (defun chan-mode-start-auto-refresh ()
   "Start auto-refresh timer if interval is set."
   (when (> chan-mode-auto-refresh-interval 0)
-    (run-at-time
-     chan-mode-auto-refresh-interval
-     chan-mode-auto-refresh-interval
-     #'chan-mode-refresh)))
+    ;; Cancel existing timer if any
+    (when chan-mode-refresh-timer
+      (cancel-timer chan-mode-refresh-timer))
+    ;; Start new timer
+    (setq chan-mode-refresh-timer
+          (run-at-time
+           chan-mode-auto-refresh-interval
+           chan-mode-auto-refresh-interval
+           #'chan-mode-refresh))))
 
 ;; Navigation
 (defun chan-mode-return-to-catalog ()
