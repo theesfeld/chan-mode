@@ -221,157 +221,155 @@
     (error
      (progn
        (message "Request error: %s" err)
-       (funcall callback nil))))
+       (funcall callback nil)))))
 
-  ;; Board selection
-  (defvar chan-mode-board-list
-    '("a"
-      "b"
-      "c"
-      "d"
-      "e"
-      "f"
-      "g"
-      "gif"
-      "h"
-      "hr"
-      "k"
-      "m"
-      "o"
-      "p"
-      "r"
-      "s"
-      "t"
-      "u"
-      "v"
-      "vg"
-      "vm"
-      "vmg"
-      "vr"
-      "vrpg"
-      "vst"
-      "w"
-      "wg"
-      "i"
-      "ic"
-      "r9k"
-      "s4s"
-      "vip"
-      "qa"
-      "cm"
-      "hm"
-      "lgbt"
-      "y"
-      "3"
-      "aco"
-      "adv"
-      "an"
-      "asp"
-      "bant"
-      "biz"
-      "cgl"
-      "ck"
-      "co"
-      "diy"
-      "fa"
-      "fit"
-      "gd"
-      "hc"
-      "his"
-      "int"
-      "jp"
-      "lit"
-      "mlp"
-      "mu"
-      "n"
-      "news"
-      "out"
-      "po"
-      "pol"
-      "pw"
-      "qst"
-      "sci"
-      "soc"
-      "sp"
-      "tg"
-      "toy"
-      "trv"
-      "tv"
-      "vp"
-      "vt"
-      "wsg"
-      "wsr"
-      "x"
-      "xs")
-    "List of valid 4chan boards.")
+;; Board selection
+(defvar chan-mode-board-list
+  '("a"
+    "b"
+    "c"
+    "d"
+    "e"
+    "f"
+    "g"
+    "gif"
+    "h"
+    "hr"
+    "k"
+    "m"
+    "o"
+    "p"
+    "r"
+    "s"
+    "t"
+    "u"
+    "v"
+    "vg"
+    "vm"
+    "vmg"
+    "vr"
+    "vrpg"
+    "vst"
+    "w"
+    "wg"
+    "i"
+    "ic"
+    "r9k"
+    "s4s"
+    "vip"
+    "qa"
+    "cm"
+    "hm"
+    "lgbt"
+    "y"
+    "3"
+    "aco"
+    "adv"
+    "an"
+    "asp"
+    "bant"
+    "biz"
+    "cgl"
+    "ck"
+    "co"
+    "diy"
+    "fa"
+    "fit"
+    "gd"
+    "hc"
+    "his"
+    "int"
+    "jp"
+    "lit"
+    "mlp"
+    "mu"
+    "n"
+    "news"
+    "out"
+    "po"
+    "pol"
+    "pw"
+    "qst"
+    "sci"
+    "soc"
+    "sp"
+    "tg"
+    "toy"
+    "trv"
+    "tv"
+    "vp"
+    "vt"
+    "wsg"
+    "wsr"
+    "x"
+    "xs")
+  "List of valid 4chan boards.")
 
-  (defun chan-mode-fetch-boards (callback)
-    "Fetch list of valid boards and call CALLBACK."
-    (if chan-mode-board-list
-        (funcall callback)
-      (chan-mode-fetch-json
-       (format "%s/boards.json" chan-mode-api-base)
-       (lambda (data)
-         (when data
-           (setq chan-mode-board-list
-                 (mapcar
-                  (lambda (board) (alist-get 'board board))
-                  (alist-get 'boards data))))
-         (funcall callback)))))
-
-  (defun chan-mode-select-board ()
-    "Prompt for a board in the minibuffer and switch to it."
-    (interactive)
-    (chan-mode-fetch-boards
-     (lambda ()
-       (let ((board
-              (completing-read "Select board: " chan-mode-board-list
-                               nil t)))
-         (when board
-           (setq chan-mode-board board)
-           (chan-mode-render-catalog))))))
-
-  ;; Remove duplicate function definition - this is causing the recursion issue
-
-  ;; Catalog view
-  (defun chan-mode-render-catalog ()
-    "Render the catalog view for the current board and page in a new buffer."
-    ;; Then fetch the data
-    (message "Fetching catalog data from 4chan API...")
+(defun chan-mode-fetch-boards (callback)
+  "Fetch list of valid boards and call CALLBACK."
+  (if chan-mode-board-list
+      (funcall callback)
     (chan-mode-fetch-json
-     (format "%s/%s/catalog.json" chan-mode-api-base chan-mode-board)
+     (format "%s/boards.json" chan-mode-api-base)
      (lambda (data)
-       (with-current-buffer (get-buffer-create
-                             chan-mode-catalog-buffer)
-         (let ((inhibit-read-only t))
-           (erase-buffer)
-           (insert
-            (format "4chan /%s/ Catalog (Page %d)\n\n"
-                    chan-mode-board
-                    chan-mode-catalog-page))
+       (when data
+         (setq chan-mode-board-list
+               (mapcar
+                (lambda (board) (alist-get 'board board))
+                (alist-get 'boards data))))
+       (funcall callback)))))
 
-           ;; Check if we have valid data
-           (if (not data)
-               (insert "Error: Failed to fetch catalog data\n")
-             (if (not (listp data))
-                 (insert "Error: Invalid data received from API\n")
-               (let ((page-data
-                      (nth
-                       (min (1- chan-mode-catalog-page)
-                            (1- (length data)))
-                       data)))
-                 (if (not page-data)
-                     (insert "Error: Page data not found\n")
-                   (let ((threads (alist-get 'threads page-data)))
-                     (if (not threads)
-                         (insert "No threads found on this page.\n")
-                       (dolist (thread threads)
-                         (chan-mode-insert-catalog-thread
-                          thread))))))))
+(defun chan-mode-select-board ()
+  "Prompt for a board in the minibuffer and switch to it."
+  (interactive)
+  (chan-mode-fetch-boards
+   (lambda ()
+     (let ((board
+            (completing-read "Select board: " chan-mode-board-list
+                             nil t)))
+       (when board
+         (setq chan-mode-board board)
+         (chan-mode-render-catalog))))))
 
-           (chan-mode-catalog-mode)
-           (goto-char (point-min))
-           (switch-to-buffer (current-buffer))))))))
+;; Catalog view
+(defun chan-mode-render-catalog ()
+  "Render the catalog view for the current board and page in a new buffer."
+  ;; Then fetch the data
+  (message "Fetching catalog data from 4chan API...")
+  (chan-mode-fetch-json
+   (format "%s/%s/catalog.json" chan-mode-api-base chan-mode-board)
+   (lambda (data)
+     (with-current-buffer (get-buffer-create
+                           chan-mode-catalog-buffer)
+       (let ((inhibit-read-only t))
+         (erase-buffer)
+         (insert
+          (format "4chan /%s/ Catalog (Page %d)\n\n"
+                  chan-mode-board
+                  chan-mode-catalog-page))
+
+         ;; Check if we have valid data
+         (if (not data)
+             (insert "Error: Failed to fetch catalog data\n")
+           (if (not (listp data))
+               (insert "Error: Invalid data received from API\n")
+             (let ((page-data
+                    (nth
+                     (min (1- chan-mode-catalog-page)
+                          (1- (length data)))
+                     data)))
+               (if (not page-data)
+                   (insert "Error: Page data not found\n")
+                 (let ((threads (alist-get 'threads page-data)))
+                   (if (not threads)
+                       (insert "No threads found on this page.\n")
+                     (dolist (thread threads)
+                       (chan-mode-insert-catalog-thread
+                        thread))))))))
+
+         (chan-mode-catalog-mode)
+         (goto-char (point-min))
+         (switch-to-buffer (current-buffer)))))))
 
 (defun chan-mode-insert-catalog-thread (thread)
   "Insert a single THREAD into the catalog view."
