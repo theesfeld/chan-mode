@@ -201,8 +201,9 @@
                (with-current-buffer (current-buffer)
                  (let ((inhibit-read-only t))
                    (erase-buffer)
-                   (insert (format "Error fetching data: %s\n" 
-                                  (plist-get status :error)))))
+                   (insert
+                    (format "Error fetching data: %s\n"
+                            (plist-get status :error)))))
                (funcall callback nil))
            (goto-char (point-min))
            (if (not (search-forward "\n\n" nil t))
@@ -210,83 +211,167 @@
                  (message "Invalid response format from %s" url)
                  (funcall callback nil))
              (condition-case err
-                 (let ((json-data (json-parse-buffer :object-type 'alist)))
+                 (let ((json-data
+                        (json-parse-buffer :object-type 'alist)))
                    (funcall callback json-data))
                (error
                 (message "JSON parsing error: %s" err)
                 (funcall callback nil))))))
        nil t t) ;; Added extra t to inhibit coding system conversion
-    (error (progn
-             (message "Request error: %s" err)
-             (funcall callback nil))))
+    (error
+     (progn
+       (message "Request error: %s" err)
+       (funcall callback nil))))
 
-;; Board selection
-(defvar chan-mode-board-list '("a" "b" "c" "d" "e" "f" "g" "gif" "h" "hr" "k" "m" "o" "p" "r" "s" "t" "u" "v" "vg" "vm" "vmg" "vr" "vrpg" "vst" "w" "wg" "i" "ic" "r9k" "s4s" "vip" "qa" "cm" "hm" "lgbt" "y" "3" "aco" "adv" "an" "asp" "bant" "biz" "cgl" "ck" "co" "diy" "fa" "fit" "gd" "hc" "his" "int" "jp" "lit" "mlp" "mu" "n" "news" "out" "po" "pol" "pw" "qst" "sci" "soc" "sp" "tg" "toy" "trv" "tv" "vp" "vt" "wsg" "wsr" "x" "xs")
-  "List of valid 4chan boards.")
+  ;; Board selection
+  (defvar chan-mode-board-list
+    '("a"
+      "b"
+      "c"
+      "d"
+      "e"
+      "f"
+      "g"
+      "gif"
+      "h"
+      "hr"
+      "k"
+      "m"
+      "o"
+      "p"
+      "r"
+      "s"
+      "t"
+      "u"
+      "v"
+      "vg"
+      "vm"
+      "vmg"
+      "vr"
+      "vrpg"
+      "vst"
+      "w"
+      "wg"
+      "i"
+      "ic"
+      "r9k"
+      "s4s"
+      "vip"
+      "qa"
+      "cm"
+      "hm"
+      "lgbt"
+      "y"
+      "3"
+      "aco"
+      "adv"
+      "an"
+      "asp"
+      "bant"
+      "biz"
+      "cgl"
+      "ck"
+      "co"
+      "diy"
+      "fa"
+      "fit"
+      "gd"
+      "hc"
+      "his"
+      "int"
+      "jp"
+      "lit"
+      "mlp"
+      "mu"
+      "n"
+      "news"
+      "out"
+      "po"
+      "pol"
+      "pw"
+      "qst"
+      "sci"
+      "soc"
+      "sp"
+      "tg"
+      "toy"
+      "trv"
+      "tv"
+      "vp"
+      "vt"
+      "wsg"
+      "wsr"
+      "x"
+      "xs")
+    "List of valid 4chan boards.")
 
-(defun chan-mode-fetch-boards (callback)
-  "Fetch list of valid boards and call CALLBACK."
-  (if chan-mode-board-list
-      (funcall callback)
+  (defun chan-mode-fetch-boards (callback)
+    "Fetch list of valid boards and call CALLBACK."
+    (if chan-mode-board-list
+        (funcall callback)
+      (chan-mode-fetch-json
+       (format "%s/boards.json" chan-mode-api-base)
+       (lambda (data)
+         (when data
+           (setq chan-mode-board-list
+                 (mapcar
+                  (lambda (board) (alist-get 'board board))
+                  (alist-get 'boards data))))
+         (funcall callback)))))
+
+  (defun chan-mode-select-board ()
+    "Prompt for a board in the minibuffer and switch to it."
+    (interactive)
+    (chan-mode-fetch-boards
+     (lambda ()
+       (let ((board
+              (completing-read "Select board: " chan-mode-board-list
+                               nil t)))
+         (when board
+           (setq chan-mode-board board)
+           (chan-mode-render-catalog))))))
+
+  ;; Remove duplicate function definition - this is causing the recursion issue
+
+  ;; Catalog view
+  (defun chan-mode-render-catalog ()
+    "Render the catalog view for the current board and page in a new buffer."
+    ;; Then fetch the data
+    (message "Fetching catalog data from 4chan API...")
     (chan-mode-fetch-json
-     (format "%s/boards.json" chan-mode-api-base)
+     (format "%s/%s/catalog.json" chan-mode-api-base chan-mode-board)
      (lambda (data)
-       (when data
-         (setq chan-mode-board-list
-               (mapcar
-                (lambda (board) (alist-get 'board board))
-                (alist-get 'boards data))))
-       (funcall callback)))))
+       (with-current-buffer (get-buffer-create
+                             chan-mode-catalog-buffer)
+         (let ((inhibit-read-only t))
+           (erase-buffer)
+           (insert
+            (format "4chan /%s/ Catalog (Page %d)\n\n"
+                    chan-mode-board
+                    chan-mode-catalog-page))
 
-(defun chan-mode-select-board ()
-  "Prompt for a board in the minibuffer and switch to it."
-  (interactive)
-  (chan-mode-fetch-boards
-   (lambda ()
-     (let ((board
-            (completing-read "Select board: " chan-mode-board-list
-                             nil t)))
-       (when board
-         (setq chan-mode-board board)
-         (chan-mode-render-catalog))))))
+           ;; Check if we have valid data
+           (if (not data)
+               (insert "Error: Failed to fetch catalog data\n")
+             (if (not (listp data))
+                 (insert "Error: Invalid data received from API\n")
+               (let ((page-data
+                      (nth
+                       (min (1- chan-mode-catalog-page)
+                            (1- (length data)))
+                       data)))
+                 (if (not page-data)
+                     (insert "Error: Page data not found\n")
+                   (let ((threads (alist-get 'threads page-data)))
+                     (if (not threads)
+                         (insert "No threads found on this page.\n")
+                       (dolist (thread threads)
+                         (chan-mode-insert-catalog-thread
+                          thread))))))))
 
-;; Remove duplicate function definition - this is causing the recursion issue
-
-;; Catalog view
-(defun chan-mode-render-catalog ()
-  "Render the catalog view for the current board and page in a new buffer."
-  ;; Then fetch the data
-  (message "Fetching catalog data from 4chan API...")
-  (chan-mode-fetch-json
-   (format "%s/%s/catalog.json" chan-mode-api-base chan-mode-board)
-   (lambda (data)
-     (with-current-buffer (get-buffer-create chan-mode-catalog-buffer)
-       (let ((inhibit-read-only t))
-         (erase-buffer)
-         (insert
-          (format "4chan /%s/ Catalog (Page %d)\n\n"
-                  chan-mode-board
-                  chan-mode-catalog-page))
-         
-         ;; Check if we have valid data
-         (if (not data)
-             (insert "Error: Failed to fetch catalog data\n")
-           (if (not (listp data))
-               (insert "Error: Invalid data received from API\n")
-             (let ((page-data (nth (min (1- chan-mode-catalog-page) 
-                                        (1- (length data)))
-                                   data)))
-               (if (not page-data)
-                   (insert "Error: Page data not found\n")
-                 (let ((threads (alist-get 'threads page-data)))
-                   (if (not threads)
-                       (insert "No threads found on this page.\n")
-                     (dolist (thread threads)
-                       (chan-mode-insert-catalog-thread thread))))))))
-         
-         (chan-mode-catalog-mode)
-         (goto-char (point-min))
-         (switch-to-buffer (current-buffer))))))))
+           (chan-mode-catalog-mode)
+           (goto-char (point-min))
+           (switch-to-buffer (current-buffer))))))))
 
 (defun chan-mode-insert-catalog-thread (thread)
   "Insert a single THREAD into the catalog view."
@@ -316,38 +401,43 @@
                          no
                          (or replies 0)
                          (or images 0))
-                 'thread-id no 
-                 'face 'font-lock-function-name-face
-                 'mouse-face 'highlight
-                 'help-echo "RET to open thread"))
-    
+                 'thread-id
+                 no
+                 'face
+                 'font-lock-function-name-face
+                 'mouse-face
+                 'highlight
+                 'help-echo
+                 "RET to open thread"))
+
     ;; Insert thumbnail if available
     (when thumb
       (condition-case nil
-          (chan-mode-insert-image thumb chan-mode-thumbnail-scale full)
+          (chan-mode-insert-image
+           thumb chan-mode-thumbnail-scale full)
         (error (insert "[Thumbnail loading failed]\n"))))
-    
+
     ;; Insert subject if available (with simplified HTML stripping)
     (when (and sub (not (string-empty-p sub)))
       (insert
-       (propertize 
-        (format "Subject: %s\n" 
-                (condition-case nil
-                    (replace-regexp-in-string "<[^>]*>" "" sub)
-                  (error (replace-regexp-in-string "<[^>]*>" "" sub))))
-        'face 'font-lock-keyword-face
-        'thread-id no)))
-    
+       (propertize (format "Subject: %s\n"
+                           (condition-case nil
+                               (replace-regexp-in-string
+                                "<[^>]*>" "" sub)
+                             (error
+                              (replace-regexp-in-string
+                               "<[^>]*>" "" sub))))
+                   'face 'font-lock-keyword-face 'thread-id no)))
+
     ;; Insert comment if available (with simplified HTML stripping)
     (when (and com (not (string-empty-p com)))
       (insert
-       (propertize 
-        (condition-case nil
-            (replace-regexp-in-string "<[^>]*>" "" com)
-          (error (replace-regexp-in-string "<[^>]*>" "" com)))
-        'face 'font-lock-string-face
-        'thread-id no)))
-    
+       (propertize (condition-case nil
+                       (replace-regexp-in-string "<[^>]*>" "" com)
+                     (error
+                      (replace-regexp-in-string "<[^>]*>" "" com)))
+                   'face 'font-lock-string-face 'thread-id no)))
+
     (insert "\n\n")))
 
 ;; Thread view
@@ -356,19 +446,22 @@
   (interactive)
   (let ((thread-id (get-text-property (point) 'thread-id)))
     (if (not thread-id)
-        (message "No thread at point. Move cursor to a thread header.")
+        (message
+         "No thread at point. Move cursor to a thread header.")
       (message "Loading thread %d..." thread-id)
       ;; Create and setup buffer first
       (let ((buffer (get-buffer-create chan-mode-thread-buffer)))
         (with-current-buffer buffer
           (let ((inhibit-read-only t))
             (erase-buffer)
-            (insert (format "Loading 4chan /%s/ Thread %d...\n"
-                            chan-mode-board thread-id))
+            (insert
+             (format "Loading 4chan /%s/ Thread %d...\n"
+                     chan-mode-board
+                     thread-id))
             (chan-mode-thread-mode)))
         ;; Display buffer immediately
         (switch-to-buffer buffer))
-      
+
       ;; Then fetch the data
       (chan-mode-fetch-json
        (format "%s/%s/thread/%d.json"
@@ -386,13 +479,13 @@
                                     chan-mode-board
                                     thread-id)
                             'thread-id thread-id))
-               
+
                (let ((posts (alist-get 'posts data)))
                  (if (not posts)
                      (insert "Error: No posts found in thread\n")
                    (dolist (post posts)
                      (chan-mode-insert-thread-post post thread-id))))
-               
+
                (goto-char (point-min))))))))))
 
 (defun chan-mode-insert-thread-post (post thread-id)
@@ -443,7 +536,8 @@
 (defun chan-mode-insert-image (url scale full-url)
   "Insert image from URL with SCALE, optionally with FULL-URL for toggling."
   (condition-case err
-      (let ((buffer (url-retrieve-synchronously url t nil 3))) ;; Add timeout of 3 seconds
+      (let
+          ((buffer (url-retrieve-synchronously url t nil 3))) ;; Add timeout of 3 seconds
         (if (not buffer)
             (insert (format "[Image loading failed: no response]"))
           (with-current-buffer buffer
@@ -451,20 +545,36 @@
             (if (not (search-forward "\n\n" nil t))
                 (insert "[Image loading failed: invalid response]")
               (condition-case img-err
-                  (let ((image-data (buffer-substring (point) (point-max))))
+                  (let ((image-data
+                         (buffer-substring (point) (point-max))))
                     (if (< (length image-data) 100) ;; Likely error page
                         (insert "[Image too small or not found]")
-                      (let ((image (create-image image-data nil t :scale scale)))
+                      (let ((image
+                             (create-image image-data
+                                           nil
+                                           t
+                                           :scale scale)))
                         (if (not image)
                             (insert "[Failed to create image]")
-                          (insert (propertize " "
-                                              'display image
-                                              'image-url url
-                                              'full-url full-url
-                                              'current-scale scale
-                                              'mouse-face 'highlight
-                                              'help-echo "RET to toggle image size"))))))
-                (error (insert (format "[Image creation failed: %s]" img-err))))))))
+                          (insert
+                           (propertize
+                            " "
+                            'display
+                            image
+                            'image-url
+                            url
+                            'full-url
+                            full-url
+                            'current-scale
+                            scale
+                            'mouse-face
+                            'highlight
+                            'help-echo
+                            "RET to toggle image size"))))))
+                (error
+                 (insert
+                  (format "[Image creation failed: %s]"
+                          img-err))))))))
     (error (insert (format "[Image request failed: %s]" err)))))
 
 (defun chan-mode-toggle-image-size ()
@@ -490,7 +600,8 @@
             (if (not (get-text-property start 'display))
                 (message "No image display property at point")
               (delete-char 1)
-              (chan-mode-insert-image new-url new-scale full-url))))))))
+              (chan-mode-insert-image
+               new-url new-scale full-url))))))))
 
 ;; Utility functions
 (defun chan-mode-strip-html (html)
@@ -577,16 +688,17 @@
        (unless (member chan-mode-board chan-mode-board-list)
          (setq chan-mode-board (car chan-mode-board-list))
          (message "Using default board /%s/" chan-mode-board)))))
-  
+
   ;; Create and display buffer immediately
   (let ((buffer (get-buffer-create chan-mode-catalog-buffer)))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (insert (format "Loading 4chan /%s/ catalog...\n" chan-mode-board))
+        (insert
+         (format "Loading 4chan /%s/ catalog...\n" chan-mode-board))
         (chan-mode-catalog-mode)))
     (switch-to-buffer buffer))
-  
+
   ;; Then fetch the data
   (message "Loading 4chan catalog for /%s/..." chan-mode-board)
   (chan-mode-render-catalog))
