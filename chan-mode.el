@@ -82,6 +82,16 @@
   :type 'string
   :group 'chan-mode)
 
+(defcustom chan-mode-image-base "https://i.4cdn.org"
+  "Base URL for the 4chan images."
+  :type 'string
+  :group 'chan-mode)
+
+(defcustom chan-mode-thumb-base "https://t.4cdn.org"
+  "Base URL for the 4chan thumbnails."
+  :type 'string
+  :group 'chan-mode)
+
 (defcustom chan-mode-thumbnail-scale 0.5
   "Scale factor for thumbnail images."
   :type 'float
@@ -179,42 +189,54 @@
 (defun chan-mode-fetch-json (url callback)
   "Fetch JSON from URL and call CALLBACK with parsed data."
   (message "Fetching %s..." url)
-  (url-retrieve
-   url
-   (lambda (status)
-     (if (plist-get status :error)
-         (progn
-           (message "Failed to fetch %s: %s"
-                    url
-                    (plist-get status :error))
-           (funcall callback nil))
-       (goto-char (point-min))
-       (if (not (search-forward "\n\n" nil t))
-           (progn
-             (message "Invalid response format from %s" url)
-             (funcall callback nil))
-         (condition-case err
-             (let ((json-data (json-parse-buffer :object-type 'alist)))
-               (funcall callback json-data))
-           (error
-            (message "JSON parsing error: %s" err)
-            (funcall callback nil))))))
-   nil t t)) ;; Added extra t to inhibit coding system conversion
+  (condition-case err
+      (url-retrieve
+       url
+       (lambda (status)
+         (if (plist-get status :error)
+             (progn
+               (message "Failed to fetch %s: %s"
+                        url
+                        (plist-get status :error))
+               (with-current-buffer (current-buffer)
+                 (let ((inhibit-read-only t))
+                   (erase-buffer)
+                   (insert (format "Error fetching data: %s\n" 
+                                  (plist-get status :error)))))
+               (funcall callback nil))
+           (goto-char (point-min))
+           (if (not (search-forward "\n\n" nil t))
+               (progn
+                 (message "Invalid response format from %s" url)
+                 (funcall callback nil))
+             (condition-case err
+                 (let ((json-data (json-parse-buffer :object-type 'alist)))
+                   (funcall callback json-data))
+               (error
+                (message "JSON parsing error: %s" err)
+                (funcall callback nil))))))
+       nil t t) ;; Added extra t to inhibit coding system conversion
+    (error (progn
+             (message "Request error: %s" err)
+             (funcall callback nil))))
 
 ;; Board selection
-(defvar chan-mode-board-list nil
+(defvar chan-mode-board-list '("a" "b" "c" "d" "e" "f" "g" "gif" "h" "hr" "k" "m" "o" "p" "r" "s" "t" "u" "v" "vg" "vm" "vmg" "vr" "vrpg" "vst" "w" "wg" "i" "ic" "r9k" "s4s" "vip" "qa" "cm" "hm" "lgbt" "y" "3" "aco" "adv" "an" "asp" "bant" "biz" "cgl" "ck" "co" "diy" "fa" "fit" "gd" "hc" "his" "int" "jp" "lit" "mlp" "mu" "n" "news" "out" "po" "pol" "pw" "qst" "sci" "soc" "sp" "tg" "toy" "trv" "tv" "vp" "vt" "wsg" "wsr" "x" "xs")
   "List of valid 4chan boards.")
 
 (defun chan-mode-fetch-boards (callback)
   "Fetch list of valid boards and call CALLBACK."
-  (chan-mode-fetch-json
-   (format "%s/boards.json" chan-mode-api-base)
-   (lambda (data)
-     (setq chan-mode-board-list
-           (mapcar
-            (lambda (board) (alist-get 'board board))
-            (alist-get 'boards data)))
-     (funcall callback))))
+  (if chan-mode-board-list
+      (funcall callback)
+    (chan-mode-fetch-json
+     (format "%s/boards.json" chan-mode-api-base)
+     (lambda (data)
+       (when data
+         (setq chan-mode-board-list
+               (mapcar
+                (lambda (board) (alist-get 'board board))
+                (alist-get 'boards data))))
+       (funcall callback)))))
 
 (defun chan-mode-select-board ()
   "Prompt for a board in the minibuffer and switch to it."
@@ -233,35 +255,22 @@
 ;; Catalog view
 (defun chan-mode-render-catalog ()
   "Render the catalog view for the current board and page in a new buffer."
-  ;; Create and setup the buffer first
-  (let ((buffer (get-buffer-create chan-mode-catalog-buffer)))
-    (with-current-buffer buffer
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (insert
-         (format "Loading 4chan /%s/ Catalog (Page %d)...\n"
-                 chan-mode-board
-                 chan-mode-catalog-page))
-        (chan-mode-catalog-mode)))
-    ;; Display the buffer immediately
-    (switch-to-buffer buffer))
-  
   ;; Then fetch the data
   (message "Fetching catalog data from 4chan API...")
   (chan-mode-fetch-json
    (format "%s/%s/catalog.json" chan-mode-api-base chan-mode-board)
    (lambda (data)
-     (if (not data)
-         (message "Error: Failed to fetch catalog data")
-       (with-current-buffer chan-mode-catalog-buffer
-         (let ((inhibit-read-only t))
-           (erase-buffer)
-           (insert
-            (format "4chan /%s/ Catalog (Page %d)\n\n"
-                    chan-mode-board
-                    chan-mode-catalog-page))
-           
-           ;; Check if we have valid data
+     (with-current-buffer (get-buffer-create chan-mode-catalog-buffer)
+       (let ((inhibit-read-only t))
+         (erase-buffer)
+         (insert
+          (format "4chan /%s/ Catalog (Page %d)\n\n"
+                  chan-mode-board
+                  chan-mode-catalog-page))
+         
+         ;; Check if we have valid data
+         (if (not data)
+             (insert "Error: Failed to fetch catalog data\n")
            (if (not (listp data))
                (insert "Error: Invalid data received from API\n")
              (let ((page-data (nth (min (1- chan-mode-catalog-page) 
@@ -273,9 +282,11 @@
                    (if (not threads)
                        (insert "No threads found on this page.\n")
                      (dolist (thread threads)
-                       (chan-mode-insert-catalog-thread thread)))))))
-           
-           (goto-char (point-min))))))))
+                       (chan-mode-insert-catalog-thread thread))))))))
+         
+         (chan-mode-catalog-mode)
+         (goto-char (point-min))
+         (switch-to-buffer (current-buffer))))))))
 
 (defun chan-mode-insert-catalog-thread (thread)
   "Insert a single THREAD into the catalog view."
@@ -288,9 +299,17 @@
          (ext (alist-get 'ext thread))
          (thumb
           (when tim
-            (format "https://t.4cdn.org/%s/%ss.jpg"
+            (format "%s/%s/%ss.jpg"
+                    chan-mode-thumb-base
                     chan-mode-board
-                    tim))))
+                    tim)))
+         (full
+          (when tim
+            (format "%s/%s/%s%s"
+                    chan-mode-image-base
+                    chan-mode-board
+                    tim
+                    ext))))
     ;; Insert thread header with properties
     (insert
      (propertize (format "Thread %d (%d replies, %d images)\n"
@@ -298,12 +317,14 @@
                          (or replies 0)
                          (or images 0))
                  'thread-id no 
-                 'face 'font-lock-function-name-face))
+                 'face 'font-lock-function-name-face
+                 'mouse-face 'highlight
+                 'help-echo "RET to open thread"))
     
     ;; Insert thumbnail if available
     (when thumb
       (condition-case nil
-          (chan-mode-insert-image thumb chan-mode-thumbnail-scale nil)
+          (chan-mode-insert-image thumb chan-mode-thumbnail-scale full)
         (error (insert "[Thumbnail loading failed]\n"))))
     
     ;; Insert subject if available (with simplified HTML stripping)
@@ -312,7 +333,7 @@
        (propertize 
         (format "Subject: %s\n" 
                 (condition-case nil
-                    (chan-mode-strip-html sub)
+                    (replace-regexp-in-string "<[^>]*>" "" sub)
                   (error (replace-regexp-in-string "<[^>]*>" "" sub))))
         'face 'font-lock-keyword-face
         'thread-id no)))
@@ -322,7 +343,7 @@
       (insert
        (propertize 
         (condition-case nil
-            (chan-mode-strip-html com)
+            (replace-regexp-in-string "<[^>]*>" "" com)
           (error (replace-regexp-in-string "<[^>]*>" "" com)))
         'face 'font-lock-string-face
         'thread-id no)))
@@ -385,12 +406,14 @@
          (ext (alist-get 'ext post))
          (thumb
           (when tim
-            (format "https://t.4cdn.org/%s/%ss.jpg"
+            (format "%s/%s/%ss.jpg"
+                    chan-mode-thumb-base
                     chan-mode-board
                     tim)))
          (full
           (when tim
-            (format "https://i.4cdn.org/%s/%s%s"
+            (format "%s/%s/%s%s"
+                    chan-mode-image-base
                     chan-mode-board
                     tim
                     ext)))
@@ -411,7 +434,7 @@
       (chan-mode-insert-image thumb chan-mode-thumbnail-scale full))
     (when com
       (insert
-       (propertize (chan-mode-strip-html com)
+       (propertize (replace-regexp-in-string "<[^>]*>" "" com)
                    'face
                    'font-lock-string-face)))
     (insert "\n\n")))
@@ -438,7 +461,9 @@
                                               'display image
                                               'image-url url
                                               'full-url full-url
-                                              'current-scale scale))))))
+                                              'current-scale scale
+                                              'mouse-face 'highlight
+                                              'help-echo "RET to toggle image size"))))))
                 (error (insert (format "[Image creation failed: %s]" img-err))))))))
     (error (insert (format "[Image request failed: %s]" err)))))
 
@@ -471,17 +496,7 @@
 (defun chan-mode-strip-html (html)
   "Strip HTML tags from HTML string."
   (if (and html (not (string-empty-p html)))
-      (condition-case err
-          (with-temp-buffer
-            (insert html)
-            (let ((shr-width 80)  ;; Set a fixed width to avoid deep recursion
-                  (shr-max-depth 3)) ;; Limit recursion depth
-              (shr-insert-document
-               (libxml-parse-html-region (point-min) (point-max))))
-            (buffer-string))
-        (error (progn
-                 (message "HTML parsing error: %s" err)
-                 (replace-regexp-in-string "<[^>]*>" "" html))))
+      (replace-regexp-in-string "<[^>]*>" "" html)
     ""))
 
 (defun chan-mode-count-you (text)
@@ -554,6 +569,25 @@
   "Start the 4chan viewer."
   (interactive)
   (setq chan-mode-catalog-page 1)
+  ;; Ensure we have a valid board
+  (unless (member chan-mode-board chan-mode-board-list)
+    (message "Fetching board list...")
+    (chan-mode-fetch-boards
+     (lambda ()
+       (unless (member chan-mode-board chan-mode-board-list)
+         (setq chan-mode-board (car chan-mode-board-list))
+         (message "Using default board /%s/" chan-mode-board)))))
+  
+  ;; Create and display buffer immediately
+  (let ((buffer (get-buffer-create chan-mode-catalog-buffer)))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "Loading 4chan /%s/ catalog...\n" chan-mode-board))
+        (chan-mode-catalog-mode)))
+    (switch-to-buffer buffer))
+  
+  ;; Then fetch the data
   (message "Loading 4chan catalog for /%s/..." chan-mode-board)
   (chan-mode-render-catalog))
 
