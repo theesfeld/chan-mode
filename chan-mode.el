@@ -178,17 +178,27 @@
 ;; API request function
 (defun chan-mode-fetch-json (url callback)
   "Fetch JSON from URL and call CALLBACK with parsed data."
+  (message "Fetching %s..." url)
   (url-retrieve
    url
    (lambda (status)
      (if (plist-get status :error)
-         (message "Failed to fetch %s: %s"
-                  url
-                  (plist-get status :error))
+         (progn
+           (message "Failed to fetch %s: %s"
+                    url
+                    (plist-get status :error))
+           (funcall callback nil))
        (goto-char (point-min))
-       (when (search-forward "\n\n" nil t)
-         (let ((json-data (json-parse-buffer :object-type 'alist)))
-           (funcall callback json-data)))))
+       (if (not (search-forward "\n\n" nil t))
+           (progn
+             (message "Invalid response format from %s" url)
+             (funcall callback nil))
+         (condition-case err
+             (let ((json-data (json-parse-buffer :object-type 'alist)))
+               (funcall callback json-data))
+           (error
+            (message "JSON parsing error: %s" err)
+            (funcall callback nil))))))
    nil t t)) ;; Added extra t to inhibit coding system conversion
 
 ;; Board selection
@@ -223,6 +233,7 @@
 ;; Catalog view
 (defun chan-mode-render-catalog ()
   "Render the catalog view for the current board and page in a new buffer."
+  ;; Create and setup the buffer first
   (let ((buffer (get-buffer-create chan-mode-catalog-buffer)))
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
@@ -232,27 +243,39 @@
                  chan-mode-board
                  chan-mode-catalog-page))
         (chan-mode-catalog-mode)))
-    (pop-to-buffer buffer))
+    ;; Display the buffer immediately
+    (switch-to-buffer buffer))
+  
+  ;; Then fetch the data
+  (message "Fetching catalog data from 4chan API...")
   (chan-mode-fetch-json
    (format "%s/%s/catalog.json" chan-mode-api-base chan-mode-board)
    (lambda (data)
-     (with-current-buffer (get-buffer-create chan-mode-catalog-buffer)
-       (let ((inhibit-read-only t))
-         (erase-buffer)
-         (insert
-          (format "4chan /%s/ Catalog (Page %d)\n\n"
-                  chan-mode-board
-                  chan-mode-catalog-page))
-         (let ((threads
-                (alist-get
-                 'threads (nth (1- chan-mode-catalog-page) data))))
-           (if threads
-               (dolist (thread threads)
-                 (chan-mode-insert-catalog-thread thread))
-             (insert "No threads found on this page.\n")))
-         (chan-mode-catalog-mode)
-         (goto-char (point-min))
-         (pop-to-buffer (current-buffer)))))))
+     (if (not data)
+         (message "Error: Failed to fetch catalog data")
+       (with-current-buffer chan-mode-catalog-buffer
+         (let ((inhibit-read-only t))
+           (erase-buffer)
+           (insert
+            (format "4chan /%s/ Catalog (Page %d)\n\n"
+                    chan-mode-board
+                    chan-mode-catalog-page))
+           
+           ;; Check if we have valid data
+           (if (not (listp data))
+               (insert "Error: Invalid data received from API\n")
+             (let ((page-data (nth (min (1- chan-mode-catalog-page) 
+                                        (1- (length data)))
+                                   data)))
+               (if (not page-data)
+                   (insert "Error: Page data not found\n")
+                 (let ((threads (alist-get 'threads page-data)))
+                   (if (not threads)
+                       (insert "No threads found on this page.\n")
+                     (dolist (thread threads)
+                       (chan-mode-insert-catalog-thread thread)))))))
+           
+           (goto-char (point-min))))))))
 
 (defun chan-mode-insert-catalog-thread (thread)
   "Insert a single THREAD into the catalog view."
@@ -311,27 +334,45 @@
   "Open the thread under point in the catalog view."
   (interactive)
   (let ((thread-id (get-text-property (point) 'thread-id)))
-    (when thread-id
+    (if (not thread-id)
+        (message "No thread at point. Move cursor to a thread header.")
+      (message "Loading thread %d..." thread-id)
+      ;; Create and setup buffer first
+      (let ((buffer (get-buffer-create chan-mode-thread-buffer)))
+        (with-current-buffer buffer
+          (let ((inhibit-read-only t))
+            (erase-buffer)
+            (insert (format "Loading 4chan /%s/ Thread %d...\n"
+                            chan-mode-board thread-id))
+            (chan-mode-thread-mode)))
+        ;; Display buffer immediately
+        (switch-to-buffer buffer))
+      
+      ;; Then fetch the data
       (chan-mode-fetch-json
        (format "%s/%s/thread/%d.json"
                chan-mode-api-base
                chan-mode-board
                thread-id)
        (lambda (data)
-         (with-current-buffer (get-buffer-create
-                               chan-mode-thread-buffer)
-           (let ((inhibit-read-only t))
-             (erase-buffer)
-             (insert
-              (propertize (format "4chan /%s/ Thread %d\n\n"
-                                  chan-mode-board
-                                  thread-id)
-                          'thread-id thread-id))
-             (dolist (post (alist-get 'posts data))
-               (chan-mode-insert-thread-post post thread-id))
-             (chan-mode-thread-mode)
-             (goto-char (point-min))
-             (pop-to-buffer (current-buffer)))))))))
+         (if (not data)
+             (message "Error: Failed to fetch thread data")
+           (with-current-buffer chan-mode-thread-buffer
+             (let ((inhibit-read-only t))
+               (erase-buffer)
+               (insert
+                (propertize (format "4chan /%s/ Thread %d\n\n"
+                                    chan-mode-board
+                                    thread-id)
+                            'thread-id thread-id))
+               
+               (let ((posts (alist-get 'posts data)))
+                 (if (not posts)
+                     (insert "Error: No posts found in thread\n")
+                   (dolist (post posts)
+                     (chan-mode-insert-thread-post post thread-id))))
+               
+               (goto-char (point-min))))))))))
 
 (defun chan-mode-insert-thread-post (post thread-id)
   "Insert a single POST into the THREAD-ID view."
@@ -379,27 +420,27 @@
 (defun chan-mode-insert-image (url scale full-url)
   "Insert image from URL with SCALE, optionally with FULL-URL for toggling."
   (condition-case err
-      (let ((buffer (url-retrieve-synchronously url t)))
-        (when buffer
+      (let ((buffer (url-retrieve-synchronously url t nil 3))) ;; Add timeout of 3 seconds
+        (if (not buffer)
+            (insert (format "[Image loading failed: no response]"))
           (with-current-buffer buffer
             (goto-char (point-min))
-            (when (search-forward "\n\n" nil t)
-              (let ((image
-                     (create-image (buffer-substring
-                                    (point) (point-max))
-                                   nil t
-                                   :scale scale)))
-                (insert
-                 (propertize " "
-                             'display
-                             image
-                             'image-url
-                             url
-                             'full-url
-                             full-url
-                             'current-scale
-                             scale)))))))
-    (error (insert (format "[Image loading failed: %s]" err)))))
+            (if (not (search-forward "\n\n" nil t))
+                (insert "[Image loading failed: invalid response]")
+              (condition-case img-err
+                  (let ((image-data (buffer-substring (point) (point-max))))
+                    (if (< (length image-data) 100) ;; Likely error page
+                        (insert "[Image too small or not found]")
+                      (let ((image (create-image image-data nil t :scale scale)))
+                        (if (not image)
+                            (insert "[Failed to create image]")
+                          (insert (propertize " "
+                                              'display image
+                                              'image-url url
+                                              'full-url full-url
+                                              'current-scale scale))))))
+                (error (insert (format "[Image creation failed: %s]" img-err))))))))
+    (error (insert (format "[Image request failed: %s]" err)))))
 
 (defun chan-mode-toggle-image-size ()
   "Toggle between thumbnail and full-size image at point."
@@ -407,7 +448,9 @@
   (let ((url (get-text-property (point) 'image-url))
         (full-url (get-text-property (point) 'full-url))
         (current-scale (get-text-property (point) 'current-scale)))
-    (when (and url full-url)
+    (if (not (and url full-url))
+        (message "No image at point")
+      (message "Toggling image size...")
       (let ((inhibit-read-only t)
             (new-url
              (if (equal url full-url)
@@ -417,8 +460,12 @@
              (if (equal url full-url)
                  chan-mode-thumbnail-scale
                chan-mode-full-image-scale)))
-        (delete-char 1)
-        (chan-mode-insert-image new-url new-scale full-url)))))
+        (save-excursion
+          (let ((start (point)))
+            (if (not (get-text-property start 'display))
+                (message "No image display property at point")
+              (delete-char 1)
+              (chan-mode-insert-image new-url new-scale full-url))))))))
 
 ;; Utility functions
 (defun chan-mode-strip-html (html)
@@ -496,14 +543,18 @@
 (defun chan-mode-return-to-catalog ()
   "Return to the catalog view from the thread view."
   (interactive)
-  (kill-this-buffer)
-  (chan-mode-render-catalog))
+  (kill-buffer chan-mode-thread-buffer)
+  (if (get-buffer chan-mode-catalog-buffer)
+      (switch-to-buffer chan-mode-catalog-buffer)
+    (chan-mode-render-catalog)))
 
 ;; Entry point
 ;;;###autoload
 (defun chan-mode ()
   "Start the 4chan viewer."
   (interactive)
+  (setq chan-mode-catalog-page 1)
+  (message "Loading 4chan catalog for /%s/..." chan-mode-board)
   (chan-mode-render-catalog))
 
 (provide 'chan-mode)
